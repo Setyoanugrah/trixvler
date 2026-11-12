@@ -1,0 +1,38 @@
+name: watchdog
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ensure runner is alive
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          active=$(curl -fsS \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/runner.yml/runs?per_page=10" \
+            | jq '[.workflow_runs[] | select(.status != "completed")] | length')
+          echo "active runner runs: $active"
+          if [ "$active" -eq 0 ]; then
+            echo "no active run -> dispatching runner"
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/runner.yml/dispatches" \
+              -d '{"ref":"main"}'
+            echo "dispatched"
+          else
+            echo "runner already alive, nothing to do"
+          fi
