@@ -33,23 +33,60 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           args: --ssh --hostname=trixvler
 
-      - name: Serve + keepalive
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Serve + tunnel + keepalive
         env:
           TRIXVLER_KEY: ${{ secrets.TRIXVLER_KEY }}
           APINEX_KEY: ${{ secrets.APINEX_KEY }}
           APINEX_MODEL: ${{ vars.APINEX_MODEL }}
+          CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
         run: |
+          set -u
           node server.mjs > server.log 2>&1 &
-          echo $! > server.pid
+          SRV=$!
           sleep 2
           curl -s localhost:8080/health; echo
-          echo "ssh ubuntu@trixvler"
-          echo "api http://trixvler:8080/solve"
+
+          if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
+            cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" > cf.log 2>&1 &
+          else
+            cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
+          fi
+          CF=$!
+          trap 'kill $SRV $CF 2>/dev/null || true' EXIT
+
+          URL=""
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cf.log | head -1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+
+          if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
+            echo "tunnel: named (pakai hostname di dashboard CF)"
+          else
+            echo "tunnel: $URL"
+          fi
+          {
+            echo "## trixvler up"
+            echo ""
+            echo "- SSH: \`ssh ubuntu@trixvler\`"
+            echo "- Tailnet API: \`http://trixvler:8080/solve\`"
+            if [ -n "$URL" ]; then echo "- Public API: \`$URL/solve\`"; fi
+            echo "- Auth: \`Authorization: Bearer <TRIXVLER_KEY>\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
           for i in $(seq 1 350); do
             sleep 60
             if [ $((i % 30)) -eq 0 ]; then
               tailscale status | head -3 || true
               curl -s localhost:8080/health || true
               echo
+              tail -2 cf.log || true
             fi
           done
