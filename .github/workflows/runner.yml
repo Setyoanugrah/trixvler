@@ -53,12 +53,13 @@ jobs:
           curl -s localhost:8080/health; echo
 
           if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
-            cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" > cf.log 2>&1 &
-          else
-            cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
+            cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" > cfn.log 2>&1 &
+            CFN=$!
           fi
+
+          cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
           CF=$!
-          trap 'kill $SRV $CF 2>/dev/null || true' EXIT
+          trap 'kill $SRV $CF ${CFN:-} 2>/dev/null || true' EXIT
 
           URL=""
           for i in $(seq 1 30); do
@@ -67,10 +68,9 @@ jobs:
             sleep 2
           done
 
+          echo "quick: ${URL:-none}"
           if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
-            echo "tunnel: named (pakai hostname di dashboard CF)"
-          else
-            echo "tunnel: $URL"
+            echo "named: aktif (hostname dari dashboard CF)"
           fi
           {
             echo "## trixvler up"
@@ -78,6 +78,7 @@ jobs:
             echo "- SSH: \`ssh ubuntu@trixvler\`"
             echo "- Tailnet API: \`http://trixvler:8080/solve\`"
             if [ -n "$URL" ]; then echo "- Public API: \`$URL/solve\`"; fi
+            if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then echo "- Named: hostname yang lu set di dashboard CF"; fi
             echo "- Auth: \`Authorization: Bearer <TRIXVLER_KEY>\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -88,5 +89,6 @@ jobs:
               curl -s localhost:8080/health || true
               echo
               tail -2 cf.log || true
+              [ -n "${CFN:-}" ] && tail -2 cfn.log || true
             fi
           done
