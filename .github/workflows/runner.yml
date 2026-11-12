@@ -1,0 +1,55 @@
+name: runner
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  up:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --ssh --hostname=trixvler
+
+      - name: Serve + keepalive
+        env:
+          TRIXVLER_KEY: ${{ secrets.TRIXVLER_KEY }}
+          APINEX_KEY: ${{ secrets.APINEX_KEY }}
+          APINEX_MODEL: ${{ vars.APINEX_MODEL }}
+        run: |
+          node server.mjs > server.log 2>&1 &
+          echo $! > server.pid
+          sleep 2
+          curl -s localhost:8080/health; echo
+          echo "ssh ubuntu@trixvler"
+          echo "api http://trixvler:8080/solve"
+          for i in $(seq 1 350); do
+            sleep 60
+            if [ $((i % 30)) -eq 0 ]; then
+              tailscale status | head -3 || true
+              curl -s localhost:8080/health || true
+              echo
+            fi
+          done

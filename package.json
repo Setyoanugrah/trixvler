@@ -1,0 +1,17 @@
+{
+  "name": "trixvler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "trixvler": "./trixvler.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0"
+  }
+}
