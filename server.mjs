@@ -1,8 +1,15 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { solve } from './trixvler.mjs';
 
+const __dir = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.TRIXVLER_KEY || '';
+const DASH = path.join(__dir, 'public', 'index.html');
+
+const stats = { total: 0, local: 0, ai: 0, tie: 0, msSum: 0 };
 
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = [];
@@ -16,29 +23,64 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
-const send = (res, code, obj) => {
-  const b = JSON.stringify(obj);
-  res.writeHead(code, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(b) });
+const send = (res, code, obj, type = 'application/json') => {
+  const b = typeof obj === 'string' ? obj : JSON.stringify(obj);
+  res.writeHead(code, { 'content-type': type, 'content-length': Buffer.byteLength(b) });
   res.end(b);
 };
 
-const server = http.createServer(async (req, res) => {
-  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
-  if (req.method !== 'POST' || req.url !== '/solve') return send(res, 404, { error: 'not-found' });
+const authorized = (req) => {
+  if (!KEY) return true;
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : req.headers['x-api-key'];
+  return token === KEY;
+};
 
-  if (KEY) {
-    const auth = req.headers.authorization || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : req.headers['x-api-key'];
-    if (token !== KEY) return send(res, 401, { error: 'unauthorized' });
+const server = http.createServer(async (req, res) => {
+  const url = (req.url || '/').split('?')[0];
+
+  if (req.method === 'GET' && (url === '/' || url === '/index.html')) {
+    try {
+      return send(res, 200, fs.readFileSync(DASH, 'utf8'), 'text/html; charset=utf-8');
+    } catch {
+      return send(res, 500, { error: 'dashboard-missing' });
+    }
   }
 
+  if (req.method === 'GET' && url === '/health') return send(res, 200, { ok: true });
+
+  if (req.method === 'GET' && url === '/stats') {
+    return send(res, 200, {
+      total: stats.total,
+      local: stats.local,
+      ai: stats.ai,
+      tie: stats.tie,
+      avgMs: stats.total ? Math.round(stats.msSum / stats.total) : 0,
+    });
+  }
+
+  if (req.method !== 'POST' || url !== '/solve') return send(res, 404, { error: 'not-found' });
+
+  if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+
+  const t0 = Date.now();
   try {
     const body = await readBody(req);
     const j = JSON.parse(body.toString('utf8'));
     const img = (j.image || '').replace(/^data:image\/\w+;base64,/, '');
     if (!img) return send(res, 400, { error: 'missing-image' });
     const buf = Buffer.from(img, 'base64');
-    const out = await solve(buf, { apiKey: process.env.APINEX_KEY, model: process.env.APINEX_MODEL, n: j.n, threshold: j.threshold });
+    const out = await solve(buf, {
+      apiKey: process.env.APINEX_KEY,
+      model: process.env.APINEX_MODEL,
+      n: j.n,
+      threshold: j.threshold,
+      mode: j.mode || 'auto',
+    });
+    stats.total++;
+    stats[out.source] = (stats[out.source] || 0) + 1;
+    if (out.tie) stats.tie++;
+    stats.msSum += Date.now() - t0;
     return send(res, 200, out);
   } catch (e) {
     return send(res, 400, { error: e.message });

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trixvler</title>
+<style>
+  :root { --bg:#0b0f17; --card:#131a26; --line:#243043; --fg:#e6edf7; --mut:#8aa0bd; --ok:#37d67a; --ai:#f5a623; --bad:#ff5c6c; --acc:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--line); position:sticky; top:0; background:rgba(11,15,23,.92); backdrop-filter:blur(6px); z-index:5; }
+  h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  h1 b { color:var(--acc); }
+  .grow { flex:1; }
+  .key { background:var(--card); border:1px solid var(--line); color:var(--fg); padding:7px 10px; border-radius:8px; width:230px; font:inherit; }
+  main { max-width:980px; margin:0 auto; padding:18px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .drop { border:1.5px dashed var(--line); border-radius:12px; padding:26px; text-align:center; color:var(--mut); cursor:pointer; transition:.15s; }
+  .drop.hot { border-color:var(--acc); color:var(--fg); background:#0f1622; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button, select { font:inherit; background:#1b2534; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; cursor:pointer; }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#04101f; font-weight:700; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #preview { position:relative; display:none; margin-top:12px; }
+  #preview img { width:100%; display:block; border-radius:8px; image-rendering:pixelated; background:#fff; }
+  .cell { position:absolute; top:0; bottom:0; border-left:1px solid rgba(76,141,255,.35); }
+  .cell span { position:absolute; top:2px; left:3px; font-size:10px; color:#4c8dff; background:rgba(11,15,23,.7); padding:0 3px; border-radius:3px; }
+  .cell.hit { background:rgba(55,214,122,.18); border-left:1px solid var(--ok); box-shadow:inset 0 0 0 2px var(--ok); }
+  .cell.hit span { color:#04101f; background:var(--ok); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; }
+  .stat { background:#0f1622; border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .stat b { display:block; font-size:18px; }
+  .stat i { color:var(--mut); font-style:normal; font-size:11px; text-transform:uppercase; letter-spacing:.6px; }
+  pre { background:#0a0e15; border:1px solid var(--line); border-radius:10px; padding:12px; overflow:auto; margin:0; font-size:12px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; }
+  .badge.local { background:rgba(55,214,122,.15); color:var(--ok); border:1px solid rgba(55,214,122,.4); }
+  .badge.ai { background:rgba(245,166,35,.15); color:var(--ai); border:1px solid rgba(245,166,35,.4); }
+  .badge.err { background:rgba(255,92,108,.15); color:var(--bad); border:1px solid rgba(255,92,108,.4); }
+  .mut { color:var(--mut); }
+  .hist { display:grid; gap:8px; }
+  .hitem { display:flex; gap:10px; align-items:center; border-top:1px solid var(--line); padding-top:8px; font-size:12px; }
+  .hitem:first-child { border-top:0; padding-top:0; }
+  .hitem img { width:90px; border-radius:4px; background:#fff; }
+  .warn { color:var(--ai); font-size:12px; margin-top:8px; display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>trix<b>vler</b></h1>
+  <span class="mut" style="font-size:12px">IconCaptcha solver</span>
+  <div class="grow"></div>
+  <input id="key" class="key" type="password" placeholder="TRIXVLER_KEY" autocomplete="off">
+</header>
+<main>
+  <section class="card">
+    <div class="stats" id="stats">
+      <div class="stat"><i>total</i><b id="s-total">-</b></div>
+      <div class="stat"><i>local</i><b id="s-local">-</b></div>
+      <div class="stat"><i>ai</i><b id="s-ai">-</b></div>
+      <div class="stat"><i>tie</i><b id="s-tie">-</b></div>
+      <div class="stat"><i>avg ms</i><b id="s-ms">-</b></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div id="drop" class="drop">Drop PNG challenge, klik buat pilih, atau Ctrl+V paste gambar</div>
+    <input id="file" type="file" accept="image/png,image/jpeg" hidden>
+    <div id="preview"><img id="img" alt="challenge"></div>
+    <div class="warn" id="warn">Kirim PNG challenge asli dari widget (field <code>challenge</code>), bukan screenshot — screenshot di-stretch jadi jumlah ikon bisa salah.</div>
+    <div class="row" style="margin-top:12px">
+      <button id="solve" class="primary" disabled>Solve</button>
+      <select id="mode">
+        <option value="auto">mode: auto</option>
+        <option value="local">mode: local only</option>
+        <option value="ai">mode: force ai</option>
+      </select>
+      <button id="clear">Clear</button>
+      <span id="lat" class="mut"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="margin-bottom:10px">
+      <b>Result</b><span id="src"></span><div class="grow"></div><span id="pick" class="mut"></span>
+    </div>
+    <pre id="out">-</pre>
+  </section>
+
+  <section class="card">
+    <b>History</b>
+    <div id="hist" class="hist" style="margin-top:10px"><span class="mut">belum ada</span></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const keyEl = $('key');
+keyEl.value = localStorage.getItem('trixvler_key') || '';
+keyEl.onchange = () => localStorage.setItem('trixvler_key', keyEl.value.trim());
+
+let b64 = null, dataUrl = null, last = null;
+
+function setImage(dataUrlOrB64, isB64) {
+  if (isB64) { b64 = dataUrlOrB64; dataUrl = 'data:image/png;base64,' + dataUrlOrB64; }
+  else { dataUrl = dataUrlOrB64; b64 = dataUrl.split(',')[1]; }
+  $('img').src = dataUrl;
+  $('preview').style.display = 'block';
+  $('solve').disabled = false;
+  $('out').textContent = '-';
+  $('src').innerHTML = '';
+  $('pick').textContent = '';
+  $('lat').textContent = '';
+  $('warn').style.display = 'none';
+  last = null;
+}
+
+function readFile(f) {
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => setImage(r.result, false);
+  r.readAsDataURL(f);
+}
+
+$('drop').onclick = () => $('file').click();
+$('file').onchange = (e) => readFile(e.target.files[0]);
+['dragenter','dragover'].forEach(ev => $('drop').addEventListener(ev, (e) => { e.preventDefault(); $('drop').classList.add('hot'); }));
+['dragleave','drop'].forEach(ev => $('drop').addEventListener(ev, (e) => { e.preventDefault(); $('drop').classList.remove('hot'); }));
+$('drop').addEventListener('drop', (e) => readFile(e.dataTransfer.files[0]));
+window.addEventListener('paste', (e) => {
+  for (const it of e.clipboardData.items) if (it.type.startsWith('image/')) { readFile(it.getAsFile()); break; }
+});
+$('clear').onclick = () => { b64 = null; dataUrl = null; $('preview').style.display = 'none'; $('solve').disabled = true; $('out').textContent = '-'; $('src').innerHTML=''; $('pick').textContent=''; };
+
+function drawCells(n, index) {
+  const pv = $('preview');
+  pv.querySelectorAll('.cell').forEach(x => x.remove());
+  if (!n) return;
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement('div');
+    d.className = 'cell' + (i === index ? ' hit' : '');
+    d.style.left = (i / n * 100) + '%';
+    d.style.width = (1 / n * 100) + '%';
+    const s = document.createElement('span');
+    s.textContent = i;
+    d.appendChild(s);
+    pv.appendChild(d);
+  }
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/stats');
+    const s = await r.json();
+    $('s-total').textContent = s.total ?? 0;
+    $('s-local').textContent = s.local ?? 0;
+    $('s-ai').textContent = s.ai ?? 0;
+    $('s-tie').textContent = s.tie ?? 0;
+    $('s-ms').textContent = s.avgMs ?? 0;
+  } catch {}
+}
+
+function addHist(img, res, ms) {
+  const h = $('hist');
+  if (h.querySelector('.mut')) h.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'hitem';
+  const im = document.createElement('img'); im.src = img;
+  const txt = document.createElement('div');
+  const idx = res.index == null ? 'null' : res.index;
+  txt.innerHTML = `<b>#${idx}</b> · n=${res.n} · ${JSON.stringify(res.counts)} · <span class="badge ${res.source === 'ai' ? 'ai' : 'local'}">${res.source}</span> · ${ms}ms`;
+  row.appendChild(im); row.appendChild(txt);
+  h.prepend(row);
+  while (h.children.length > 8) h.lastChild.remove();
+}
+
+$('solve').onclick = async () => {
+  if (!b64) return;
+  $('solve').disabled = true;
+  $('lat').textContent = 'solving...';
+  const t0 = performance.now();
+  try {
+    const headers = { 'content-type': 'application/json' };
+    const k = keyEl.value.trim();
+    if (k) headers['authorization'] = 'Bearer ' + k;
+    const r = await fetch('/solve', { method: 'POST', headers, body: JSON.stringify({ image: b64, mode: $('mode').value }) });
+    const ms = Math.round(performance.now() - t0);
+    const j = await r.json();
+    last = j;
+    $('lat').textContent = ms + ' ms';
+    $('out').textContent = JSON.stringify(j, null, 2);
+    if (r.ok) {
+      $('src').innerHTML = `<span class="badge ${j.source === 'ai' ? 'ai' : 'local'}">${j.source}</span>`;
+      $('pick').textContent = j.index == null ? 'index: null (ambiguous)' : `pilih tile ${j.index} (pos ${j.index + 1}/${j.n})`;
+      drawCells(j.n, j.index);
+      addHist(dataUrl, j, ms);
+    } else {
+      $('src').innerHTML = '<span class="badge err">error</span>';
+    }
+  } catch (e) {
+    $('out').textContent = 'Error: ' + e.message;
+    $('src').innerHTML = '<span class="badge err">error</span>';
+  } finally {
+    $('solve').disabled = false;
+    loadStats();
+  }
+};
+
+loadStats();
+setInterval(loadStats, 15000);
+</script>
+</body>
+</html>

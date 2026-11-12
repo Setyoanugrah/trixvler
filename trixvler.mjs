@@ -149,17 +149,28 @@ export async function aiFallback(b64, opts = {}) {
   const key = opts.apiKey || process.env.APINEX_KEY;
   if (!key) return null;
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
+  const n = opts.n || 8;
+  const text = [
+    `The image is a horizontal strip of ${n} icons. Tile 0 is the leftmost, tile ${n - 1} is the rightmost.`,
+    'Some tiles show the SAME base icon rotated by 0/90/180/270 degrees and/or mirrored; treat those as ONE type.',
+    '',
+    'Do this, in order:',
+    '1) Describe each tile base icon in 1-3 words (ignore rotation and mirroring).',
+    '2) Group tiles that share the same base icon.',
+    '3) Count the tiles in every group.',
+    '4) Identify the group(s) with the smallest count.',
+    '',
+    'Return ONLY JSON, no prose:',
+    '{"tiles":["desc0","desc1"],"groups":[[0,3]],"counts":[2],"least":[indices in the smallest group]}',
+  ].join('\n');
   const body = {
     model,
     temperature: 0,
-    max_tokens: 400,
+    max_tokens: 700,
     messages: [{
       role: 'user',
       content: [
-        {
-          type: 'text',
-          text: 'This is an IconCaptcha challenge strip. Group the icons left-to-right by IDENTICAL shape; rotated (90/180/270) and mirrored copies count as the SAME icon. Return ONLY JSON: {"groups":[[indices]],"least":<index of smallest group>}. Indices are 0-based.',
-        },
+        { type: 'text', text },
         { type: 'image_url', image_url: { url: 'data:image/png;base64,' + b64 } },
       ],
     }],
@@ -176,11 +187,15 @@ export async function aiFallback(b64, opts = {}) {
     if (!m) return null;
     const p = JSON.parse(m[0]);
     const g = Array.isArray(p.groups) ? p.groups : [];
-    if (!g.length) return null;
-    let best = g[0];
-    for (const x of g) if (x.length < best.length) best = x;
-    const idx = typeof p.least === 'number' ? p.least : best[0];
-    return typeof idx === 'number' ? { index: idx, groups: g, source: 'ai' } : null;
+    let least = Array.isArray(p.least) ? p.least.filter((x) => typeof x === 'number') : [];
+    if (!least.length && g.length) {
+      let best = g[0];
+      for (const x of g) if (Array.isArray(x) && x.length < best.length) best = x;
+      least = best;
+    }
+    const idx = least[0];
+    if (typeof idx !== 'number') return null;
+    return { index: idx, groups: g, tiles: p.tiles, source: 'ai' };
   } catch {
     return null;
   }
@@ -189,12 +204,14 @@ export async function aiFallback(b64, opts = {}) {
 export async function solve(buffer, opts = {}) {
   const png = PNG.sync.read(buffer);
   const local = analyze(png, opts);
-  if (!local.tie) return { ...local, source: 'local' };
-  if (opts.useAI === false) return { ...local, source: 'local' };
+  const mode = opts.mode || 'auto';
+  if (mode === 'local') return { ...local, source: 'local' };
+  const needAI = mode === 'ai' || local.tie;
+  if (!needAI) return { ...local, source: 'local' };
   const b64 = Buffer.from(buffer).toString('base64');
-  const ai = await aiFallback(b64, opts);
+  const ai = await aiFallback(b64, { ...opts, n: local.n });
   if (ai) return { ...local, ...ai, localIndex: local.index, source: 'ai' };
-  return { ...local, source: 'local' };
+  return { ...local, source: 'local', aiFailed: true };
 }
 
 const isMain = process.argv[1] && import.meta.url === 'file://' + process.argv[1];
