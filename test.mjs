@@ -48,7 +48,7 @@ function makeChallenge(types, seed = 1, transparent = false) {
   }
   for (let x = 0; x < W; x++) {
     for (let y = 0; y < H; y++) {
-      if (x % 40 === 0 || y === 0 || y === H - 1) setPx(png, x, y, 229);
+      if (x % 40 === 0 || x === W - 1 || y === 0 || y === H - 1) setPx(png, x, y, 229);
     }
   }
   let s = seed;
