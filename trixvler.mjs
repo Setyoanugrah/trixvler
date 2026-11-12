@@ -7,28 +7,42 @@ const CELL_H = 50;
 const THRESH = 0.12;
 
 const lum = (d, i) => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+const inkAt = (d, i) => {
+  const a = d[i + 3];
+  if (a === 0) return 0;
+  return (a / 255) * Math.max(0, 255 - lum(d, i));
+};
+
+export function detectSeparators(png) {
+  const W = png.width, H = png.height, d = png.data;
+  const isLine = new Array(W).fill(false);
+  for (let x = 0; x < W; x++) {
+    let g = 0;
+    for (let y = 0; y < H; y++) {
+      const i = (y * W + x) * 4;
+      if (d[i + 3] < 10) continue;
+      const l = lum(d, i);
+      if (l > 195 && l < 248) g++;
+    }
+    isLine[x] = g > H * 0.8;
+  }
+  const runs = [];
+  let s = -1;
+  for (let x = 0; x <= W; x++) {
+    const on = x < W && isLine[x];
+    if (on && s < 0) s = x;
+    if (!on && s >= 0) { runs.push((s + x - 1) / 2); s = -1; }
+  }
+  const internal = runs.filter((cx) => cx > 2 && cx < W - 3);
+  return internal.length + 1;
+}
 
 export function inferN(png) {
+  const sep = detectSeparators(png);
+  if (sep >= 5 && sep <= 8) return sep;
   const r = Math.round((png.width / png.height) * (CELL_H / CELL_W));
   if (r >= 5 && r <= 8) return r;
-  const W = png.width, H = png.height, d = png.data;
-  const col = new Array(W).fill(0);
-  for (let x = 0; x < W; x++) {
-    let hits = 0;
-    for (let y = 0; y < H; y++) {
-      const l = lum(d, (y * W + x) * 4);
-      if (l > 195 && l < 248) hits++;
-    }
-    col[x] = hits;
-  }
-  let lines = 0, run = false;
-  for (let x = 0; x < W; x++) {
-    const on = col[x] >= H * 0.85;
-    if (on && !run) lines++;
-    run = on;
-  }
-  const guess = lines + 1;
-  return guess >= 5 && guess <= 8 ? guess : 8;
+  return 8;
 }
 
 const rot90 = (d) => {
@@ -63,7 +77,7 @@ function descriptor(png, x0, x1) {
   let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
   for (let y = 0; y < H; y++) {
     for (let x = x0; x < x1; x++) {
-      if (lum(d, (y * W + x) * 4) < 190) {
+      if (inkAt(d, (y * W + x) * 4) > 90) {
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
       }
@@ -83,7 +97,7 @@ function descriptor(png, x0, x1) {
         if (yy < 0 || yy >= H) continue;
         for (let xx = Math.floor(ax); xx < Math.ceil(bx); xx++) {
           if (xx < 0 || xx >= W) continue;
-          sum += Math.max(0, 255 - lum(d, (yy * W + xx) * 4));
+          sum += inkAt(d, (yy * W + xx) * 4);
           cnt++;
         }
       }

@@ -37,10 +37,14 @@ function drawIcon(png, cx, cy, r, type, rot, flip) {
   }
 }
 
-function makeChallenge(types, seed = 1) {
+function makeChallenge(types, seed = 1, transparent = false) {
   const png = new PNG({ width: W, height: H });
   for (let i = 0; i < png.data.length; i += 4) {
-    png.data[i] = 255; png.data[i + 1] = 255; png.data[i + 2] = 255; png.data[i + 3] = 255;
+    if (transparent) {
+      png.data[i] = 0; png.data[i + 1] = 0; png.data[i + 2] = 0; png.data[i + 3] = 0;
+    } else {
+      png.data[i] = 255; png.data[i + 1] = 255; png.data[i + 2] = 255; png.data[i + 3] = 255;
+    }
   }
   for (let x = 0; x < W; x++) {
     for (let y = 0; y < H; y++) {
@@ -61,11 +65,12 @@ const cases = [
   { types: ['square', 'triangle', 'plus', 'square', 'triangle', 'plus', 'square', 'triangle'], least: ['plus'] },
   { types: ['plus', 'plus', 'square', 'triangle', 'square', 'plus', 'triangle', 'plus'], tie: true },
   { types: ['triangle', 'square', 'square', 'plus', 'plus', 'plus', 'square', 'triangle'], least: ['triangle'] },
+  { types: ['plus', 'triangle', 'square', 'plus', 'triangle', 'square', 'plus', 'triangle'], least: ['square'], transparent: true },
 ];
 
 let pass = 0;
 for (let c = 0; c < cases.length; c++) {
-  const png = makeChallenge(cases[c].types, c + 7);
+  const png = makeChallenge(cases[c].types, c + 7, !!cases[c].transparent);
   const buf = PNG.sync.write(png);
   const out = await solve(buf, { useAI: false });
   if (cases[c].tie) {
