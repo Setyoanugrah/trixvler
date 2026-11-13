@@ -285,6 +285,8 @@ export async function solveRecaptcha(opts = {}) {
             if (f) {
               challenge = f;
               try {
+                const bodyT = await f.locator('body').innerText().catch(() => '');
+                if (/verification expired/i.test(bodyT)) continue; // dead frame - keep polling
                 const vis = await f.locator('.rc-imageselect-target, .rc-image-tile-wrapper').first().isVisible().catch(() => false);
                 if (vis) { refound = true; break; }
               } catch {}
