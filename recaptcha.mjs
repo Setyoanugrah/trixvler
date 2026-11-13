@@ -76,7 +76,13 @@ async function clickAt(challenge, loc, nx, ny) {
   if (!box) return;
   const px = Math.max(2, Math.min(box.width - 2, Math.round((nx / 1000) * box.width)));
   const py = Math.max(2, Math.min(box.height - 2, Math.round((ny / 1000) * box.height)));
-  await loc.click({ position: { x: px, y: py }, delay: rnd(30, 90), force: true });
+  // raw mouse events at page level: no actionability/stability wait (tiles animate)
+  const frameEl = await challenge.frameElement();
+  const fb = await frameEl.boundingBox();
+  await challenge.page().mouse.move(fb.x + box.x + px, fb.y + box.y + py, { steps: 5 });
+  await challenge.page().mouse.down();
+  await sleep(rnd(30, 80));
+  await challenge.page().mouse.up();
   await sleep(rnd(150, 450));
 }
 
