@@ -88,6 +88,7 @@ const TILE_PROMPT = (instruction, ix, iy, cols, rows) => [
   `(tile at column ${ix + 1} of ${cols}, row ${iy + 1} of ${rows}; column 1 = leftmost, row 1 = topmost).`,
   `The challenge asks to select tiles containing: "${instruction || 'the requested object'}".`,
   '',
+  'The tile image may be distorted (posterized, edge-enhanced, high-contrast noise) - this is intentional; look through the distortion and judge the CONTENT.',
   'Look carefully at the whole tile. Answer ONLY JSON: {"match":true} or {"match":false}.',
   'Match = any significant part of the object is visible in this tile (partial views count: e.g. a car bumper, part of a bus, a fragment of a hydrant).',
   'No match = only background/scenery (grass, road, sky, water, walls) or an unrelated object.',
@@ -132,6 +133,7 @@ export async function solveRecaptcha(opts = {}) {
   const key = opts.apiKey || process.env.APINEX_KEY;
   if (!key) throw new Error('missing-apinex-key');
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
+  const models = [model, 'gpt-6.1-sol'].filter((m, i, a) => a.indexOf(m) === i);
   const maxRounds = Math.min(Number(opts.maxRounds) || 8, 15);
   const t0 = Date.now();
   const log = [];
@@ -246,15 +248,16 @@ export async function solveRecaptcha(opts = {}) {
           // ask the model per tile, small parallel burst
           const answers = await Promise.all(jobs.map(async ({ ix, iy }) => {
             const crop = await sharpCrop(shot, Math.round(ix * cellW), Math.round(iy * cellH), Math.round(cellW), Math.round(cellH));
-            try {
-              const raw = await arVision({
-                imageB64: crop.toString('base64'),
-                prompt: TILE_PROMPT(instruction.replace(/\s+/g, ' ').trim(), ix, iy, cols, rows),
-                key, model,
-              });
-              const p = parseJsonLoose(raw);
-              return { ix, iy, match: !!(p && p.match) };
-            } catch { return { ix, iy, match: false }; }
+            const b64 = crop.toString('base64');
+            const prompt = TILE_PROMPT(instruction.replace(/\s+/g, ' ').trim(), ix, iy, cols, rows);
+            const votes = await Promise.all(models.map(async (m) => {
+              try {
+                const raw = await arVision({ imageB64: b64, prompt, key, model: m });
+                const p = parseJsonLoose(raw);
+                return !!(p && p.match);
+              } catch { return false; }
+            }));
+            return { ix, iy, match: votes.some(Boolean), votes };
           }));
           clicks = answers.filter((a) => a.match)
             .map((a) => ({ x: Math.round(((a.ix + 0.5) / cols) * 1000), y: Math.round(((a.iy + 0.5) / rows) * 1000) }));
