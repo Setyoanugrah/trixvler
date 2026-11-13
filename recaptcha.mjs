@@ -119,14 +119,32 @@ async function waitAllDeselected(challenge, maxMs = 15000) {
   return false;
 }
 
-async function waitTileRender(challenge, imgLoc, maxMs = 7000) {
+async function shotIsBlank(buf) {
+  try {
+    const img = PNG.sync.read(buf);
+    let white = 0, total = 0;
+    for (let i = 0; i < img.data.length; i += 40) {
+      total++;
+      const r = img.data[i], g = img.data[i + 1], b = img.data[i + 2];
+      if (r > 235 && g > 235 && b > 235) white++;
+    }
+    return total > 0 && white / total > 0.9;
+  } catch { return false; }
+}
+
+async function waitTileRender(challenge, imgLoc, maxMs = 12000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
     await sleep(800);
     try {
-      const srcs = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
-        (els) => els.map((e) => e.getAttribute('src') || ''));
-      if (srcs.length && srcs.every((x) => x && x.length > 50)) return true;
+      // pixel-level check: every tile img decoded (complete && naturalWidth > 0)
+      const ok = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
+        (els) => els.length > 0 && els.every((e) => e.complete && e.naturalWidth > 10));
+      if (!ok) continue;
+      // blank-guard: screenshot must actually contain image content
+      const page = challenge.page();
+      const buf = await page.screenshot({ type: 'png', animations: 'disabled' });
+      if (!shotIsBlank(buf)) return true;
     } catch {}
   }
   return false;
@@ -268,10 +286,10 @@ export async function solveRecaptcha(opts = {}) {
           .locator('.rc-imageselect-instructions .rc-imageselect-desc-wrapper, .rc-imageselect-desc-wrapper, .instructions')
           .first().innerText().catch(() => '');
 
-        // full-page screenshot + crop to the challenge image box (locator.screenshot
-        // hangs on "element to be stable" because tiles keep animating)
+        // full-page screenshot + crop; if the crop is blank, give the tiles one more
+        // render window before asking the model (protects the vision budget)
         const vp = page.viewportSize(); const pageW = vp.width, pageH = vp.height;
-        const pageBuf = await page.screenshot({ type: 'png', animations: 'disabled' });
+        let pageBuf = await page.screenshot({ type: 'png', animations: 'disabled' });
         let shot = pageBuf;
         let shotW = pageW, shotH = pageH;
         try {
@@ -283,6 +301,11 @@ export async function solveRecaptcha(opts = {}) {
             const gw = Math.min(pageW - gx, Math.round(bb.width)), gh = Math.min(pageH - gy, Math.round(bb.height));
             shot = await sharpCrop(pageBuf, gx, gy, gw, gh);
             shotW = gw; shotH = gh;
+            if (shotIsBlank(shot)) {
+              await sleep(4000);
+              pageBuf = await page.screenshot({ type: 'png', animations: 'disabled' });
+              shot = await sharpCrop(pageBuf, gx, gy, gw, gh);
+            }
           }
         } catch {}
 
