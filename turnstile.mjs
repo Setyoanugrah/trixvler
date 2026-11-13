@@ -86,6 +86,20 @@ async function injectWidget(page, sitekey, action, cdata) {
   }, { sk: sitekey, act: action, cd: cdata }).catch(() => {});
 }
 
+async function diagnostics(page) {
+  const info = await page.evaluate(() => ({
+    title: document.title,
+    url: location.href,
+    widgets: document.querySelectorAll('.cf-turnstile, [data-sitekey]').length,
+    hasResponse: !!document.querySelector('[name="cf-turnstile-response"]'),
+    hasTurnstile: typeof window.turnstile !== 'undefined',
+  })).catch(() => ({}));
+  const frames = page.frames().map((f) => f.url()).filter(Boolean);
+  let screenshot = null;
+  try { screenshot = (await page.screenshot({ type: 'png' })).toString('base64'); } catch {}
+  return { ...info, frames, screenshot };
+}
+
 export async function solveTurnstile(opts = {}) {
   const {
     url,
@@ -94,6 +108,7 @@ export async function solveTurnstile(opts = {}) {
     cdata,
     proxy,
     cookies,
+    debug = false,
     headless = process.env.TURNSTILE_HEADED !== '1',
     timeoutMs = DEFAULT_TIMEOUT,
   } = opts;
@@ -137,7 +152,11 @@ export async function solveTurnstile(opts = {}) {
       if (clicks < 3) { await tryClick(page); clicks++; }
       await page.waitForTimeout(1000);
     }
-    if (!token) throw new Error('turnstile-timeout (kemungkinan butuh interaksi / proxy residential)');
+    if (!token) {
+      if (debug) return { token: null, error: 'turnstile-timeout', elapsedMs: Date.now() - t0, ...(await diagnostics(page)) };
+      throw new Error('turnstile-timeout (kemungkinan butuh interaksi / proxy residential)');
+    }
+    if (debug) return { token, elapsedMs: Date.now() - t0, sitekey: sitekey || null, url, ...(await diagnostics(page)) };
     return { token, elapsedMs: Date.now() - t0, sitekey: sitekey || null, url };
   } finally {
     try { await browser?.close(); } catch {}

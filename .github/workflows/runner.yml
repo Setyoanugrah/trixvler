@@ -25,7 +25,10 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Install browser
-        run: npx patchright install --with-deps chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npx patchright install --with-deps chromium
 
       - name: Test
         run: npm test
@@ -49,9 +52,10 @@ jobs:
           APINEX_MODEL: ${{ vars.APINEX_MODEL }}
           CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
+          TURNSTILE_HEADED: "1"
         run: |
           set -u
-          node server.mjs > server.log 2>&1 &
+          xvfb-run -a node server.mjs > server.log 2>&1 &
           SRV=$!
           sleep 2
           curl -s localhost:8080/health; echo
@@ -104,7 +108,7 @@ jobs:
               else
                 echo "health FAIL -> restart server"
                 kill "$SRV" 2>/dev/null || true
-                node server.mjs >> server.log 2>&1 &
+                xvfb-run -a node server.mjs >> server.log 2>&1 &
                 SRV=$!
                 sleep 2
                 curl -s localhost:8080/health || true

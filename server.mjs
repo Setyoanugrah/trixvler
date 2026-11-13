@@ -84,6 +84,7 @@ const server = http.createServer(async (req, res) => {
         cdata: j.cdata,
         proxy: j.proxy,
         cookies: j.cookies,
+        debug: !!j.debug,
         timeoutMs: Math.max(5000, Math.min(Number(j.timeout || 60) * 1000, 180000)),
       });
       stats.turnstile++;
