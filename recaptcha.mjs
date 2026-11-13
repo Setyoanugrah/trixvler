@@ -284,6 +284,7 @@ export async function solveRecaptcha(opts = {}) {
         const imgLoc = await findImageLoc(challenge);
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
         await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s; screenshot only when stable
+        await waitAllDeselected(challenge); // never judge while any tile is still checkmarked
 
         // unusual-traffic / expiry checks
         const bodyTxt = await challenge.locator('body').innerText().catch(() => '');
@@ -367,7 +368,30 @@ export async function solveRecaptcha(opts = {}) {
           clicks = [picked];
           log.push(`r${round}:model=${m}:pick=tile${picked.idx}`);
         } else {
-          log.push(`r${round}:model=${m}:none`);
+          // guard against judging a mid-transition grid: one extra render wait + re-judge with luna
+          await waitTileRender(challenge, imgLoc, 10000);
+          let reparsed = null;
+          try {
+            const raw2 = await arVision({
+              imageB64: shot.toString('base64'),
+              prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
+              key, model: 'free/gpt-6-luna',
+            });
+            reparsed = parseJsonLoose(raw2);
+          } catch {}
+          if (reparsed && Array.isArray(reparsed.tiles)) {
+            const idx = reparsed.tiles.findIndex((v) => v === true);
+            if (idx >= 0) {
+              const ix = idx % c, iy = Math.floor(idx / c);
+              picked = { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
+              clicks = [picked];
+              log.push(`r${round}:rejudge-luna:pick=tile${picked.idx}`);
+            } else {
+              log.push(`r${round}:none-confirmed`);
+            }
+          } else {
+            log.push(`r${round}:none`);
+          }
         }
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
