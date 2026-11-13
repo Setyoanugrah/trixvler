@@ -37,17 +37,29 @@ jobs:
         uses: tailscale/github-action@v2
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
-          args: --ssh --hostname=trixvler
+          args: --ssh=false --hostname=trixvler
 
-      - name: SSH server (password, port 2222)
+      - name: SSH server (password, port 22)
         run: |
+          PW=$(openssl rand -hex 8)
+          echo "PW=$PW" >> "$GITHUB_ENV"
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
-          sudo useradd -m -s /bin/bash trix 2>/dev/null || true
-          echo 'trix:trixvler2026' | sudo chpasswd
-          printf 'Port 2222\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin yes\n' | sudo tee /etc/ssh/sshd_config.d/99-trix.conf >/dev/null
-          sudo systemctl restart ssh 2>/dev/null || sudo service ssh restart 2>/dev/null || sudo /usr/sbin/sshd -p 2222
-          (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':2222' || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server >/dev/null
+          id -u trix >/dev/null 2>&1 || sudo useradd -m -s /bin/bash trix
+          echo "trix:$PW" | sudo chpasswd
+          echo "trix ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/trix >/dev/null
+          sudo chmod 440 /etc/sudoers.d/trix
+          printf '%s\n' 'PasswordAuthentication yes' 'KbdInteractiveAuthentication no' 'PermitRootLogin no' 'Port 22' | sudo tee /etc/ssh/sshd_config.d/99-trix.conf >/dev/null
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -t
+          sudo service ssh restart || sudo /usr/sbin/sshd
+
+      - name: Credential
+        run: |
+          IP4=$(tailscale ip -4 | head -1)
+          BODY=$(printf 'IP: %s\nUSERNAME: trix\nPASSWORD: %s' "$IP4" "$PW")
+          printf '%s\n' "$BODY" | tee -a "$GITHUB_STEP_SUMMARY"
+          curl -fsS -m 10 -d "$BODY" https://ntfy.sh/trixvler-ssh-9f2c7b7a >/dev/null 2>&1 || true
 
       - name: Install cloudflared
         run: |
