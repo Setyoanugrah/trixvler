@@ -286,7 +286,8 @@ export async function solveRecaptcha(opts = {}) {
           clicks = parsed.clicks.filter((cc) => Number.isFinite(cc?.x) && Number.isFinite(cc?.y)).slice(0, 20);
         }
         clicks = clicks.slice(0, c * r);
-        log.push(`r${round}:model=${m}:clicks=${clicks.length}`);
+        log.push(`r${round}:model=${m}:clicks=${clicks.length}:tiles=${JSON.stringify(parsed.tiles || [])}:instr=${(instruction || '').replace(/\s+/g, ' ').slice(0, 60)}`);
+        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw, tiles: parsed.tiles || null })); } catch {}
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.png`, shot); } catch {}
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
