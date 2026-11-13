@@ -229,10 +229,24 @@ export async function solveRecaptcha(opts = {}) {
     if (!solved && challenge) {
       for (let round = 1; round <= maxRounds; round++) {
         rounds = round;
-        // after each VERIFY the challenge frame may be replaced with a fresh one;
-        // a stale frame reference yields blank screenshots and all-false answers
-        const fresh = page.frames().find((f) => f.url().includes('api2/bframe') && !f.isDetached());
-        if (fresh) challenge = fresh;
+        // after VERIFY the bframe may close and reopen with a NEW frame object;
+        // poll for a live bframe whose grid actually re-rendered (up to ~20s)
+        if (round > 1) {
+          let refound = false;
+          for (let w = 0; w < 40 && !refound; w++) {
+            const f = page.frames().find((fr) => fr.url().includes('api2/bframe') && !fr.isDetached());
+            if (f) {
+              challenge = f;
+              try {
+                const vis = await f.locator('.rc-imageselect-target, .rc-image-tile-wrapper').first().isVisible().catch(() => false);
+                if (vis) { refound = true; break; }
+              } catch {}
+            }
+            await sleep(500);
+          }
+          log.push(`r${round}:refound=${refound}`);
+          if (!refound && await anchorChecked(anchor)) { solved = true; break; }
+        }
         const imgLoc = await findImageLoc(challenge);
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
         await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s; screenshot only when stable
