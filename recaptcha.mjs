@@ -146,7 +146,15 @@ export async function solveRecaptcha(opts = {}) {
   const key = opts.apiKey || process.env.APINEX_KEY;
   if (!key) throw new Error('missing-apinex-key');
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
-  const models = [model, 'gpt-6.1-sol'].filter((m, i, a) => a.indexOf(m) === i); // pool for rotation
+  // vision-capable free-pool models; rotation = resilience against per-model throttling
+  const FREE_VISION = [
+    'free/gemini-3.8-flash',
+    'free/qwen-3.8-max',
+    'free/gpt-6-luna',
+    'free/kimi-k3',
+    'free/mimo-v2.6-pro',
+  ];
+  const models = FREE_VISION.includes(model) ? FREE_VISION : [model, ...FREE_VISION];
   const challengeDeadlineMs = 150000; // recaptcha expires in ~2-5min; stay under it
   let challengeStart = Date.now();
   const maxRounds = Math.min(Number(opts.maxRounds) || 8, 15);
