@@ -342,7 +342,6 @@ export async function solveRecaptcha(opts = {}) {
         const c = cols || 3, r = rows || 3;
         let picked = null;
         let m = models[0];
-        let parsed_log = '';
         for (let attempt = 0; attempt < Math.min(3, models.length); attempt++) {
           m = models[(round - 1 + attempt) % models.length];
           try {
@@ -362,7 +361,6 @@ export async function solveRecaptcha(opts = {}) {
               break;
             }
           } catch {}
-          parsed_log = raw; // keep last raw for debug
         }
         if (picked) {
           clicks = [picked];
