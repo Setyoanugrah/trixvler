@@ -63,36 +63,23 @@ async function arVision({ imageB64, prompt, key, model, timeoutMs = 120000 }) {
   return (j?.choices?.[0]?.message?.content || '').trim();
 }
 
-function visionPrompt(instruction) {
+function visionPrompt(instruction, cols, rows) {
+  const n = cols * rows;
   return [
-    'You are analyzing a screenshot of a reCAPTCHA image-grid challenge.',
-    `The user is asked to: "${instruction || 'select all images matching the requested category'}"`,
+    'You are analyzing a screenshot of a reCAPTCHA image challenge.',
+    `The challenge instruction is: "${instruction || 'select all images matching the requested category'}"`,
     '',
-    'The image area contains a grid of photo tiles (usually 3x3 or 4x4, sometimes one example image above the grid).',
-    'Rules for selecting a tile:',
-    '- Select a tile if ANY significant part of the requested object appears in it (even a wheel of a car, a sliver of a storefront sign, a partial traffic light).',
-    '- IGNORE the small example image above the grid if one exists - only the grid tiles matter.',
-    '- Ignore tiles already marked with a blue checkmark overlay (selected in a previous round).',
-    '- When unsure whether a tile shows the object, include it. False positives are much less costly than misses.',
-    '- Do NOT select tiles that show only background (grass, sky, road, water, walls) with no trace of the object.',
+    `The image is a ${cols}x${rows} grid of ${n} photo tiles, indexed 0-${n - 1} in reading order (0 = top-left, across each row).`,
+    'The tiles may be distorted (posterized, edge-enhanced, noisy) on purpose - judge the CONTENT through the distortion.',
+    'Select a tile if ANY significant part of the requested object appears in it - partial views count (a wheel, a bumper, a fragment of a sign).',
+    'Do NOT select tiles showing only background: grass, sky, road, water, walls, fences.',
+    'Do NOT select tiles already marked with a blue/white checkmark overlay.',
     '',
-    'Return ONLY JSON, no prose, exactly this shape:',
-    '{"clicks":[{"x":N,"y":N}]}',
-    'x,y = click position normalized 0-1000 relative to THIS image (0,0 top-left, 1000,1000 bottom-right), center of each matching tile.',
-    'If no tile matches, return {"clicks":[]}.',
+    'Return ONLY JSON, exactly:',
+    `{"tiles":[${Array(n).fill('true|false').join(',')}]}  -> e.g. {"tiles":[true,false,false,true,false,false,false,false,true]}`,
+    'The array MUST have exactly ' + n + ' boolean entries, entry i = whether tile i should be selected.',
   ].join('\n');
 }
-
-const TILE_PROMPT = (instruction, ix, iy, cols, rows) => [
-  'You are looking at ONE cropped photo tile from a reCAPTCHA grid',
-  `(tile at column ${ix + 1} of ${cols}, row ${iy + 1} of ${rows}; column 1 = leftmost, row 1 = topmost).`,
-  `The challenge asks to select tiles containing: "${instruction || 'the requested object'}".`,
-  '',
-  'The tile image may be distorted (posterized, edge-enhanced, high-contrast noise) - this is intentional; look through the distortion and judge the CONTENT.',
-  'Look carefully at the whole tile. Answer ONLY JSON: {"match":true} or {"match":false}.',
-  'Match = any significant part of the object is visible in this tile (partial views count: e.g. a car bumper, part of a bus, a fragment of a hydrant).',
-  'No match = only background/scenery (grass, road, sky, water, walls) or an unrelated object.',
-].join('\n');
 
 async function findImageLoc(challenge) {
   for (const sel of ['.rc-imageselect-target', '.rc-dynamic-image-wrapper', '.rc-image-tile-target']) {
@@ -270,43 +257,28 @@ export async function solveRecaptcha(opts = {}) {
           else if (tiles === 4) { cols = 2; rows = 2; }
         } catch {}
 
-        // strategy: r1 = whole grid; later rounds (or when grid unknown) = per-tile voting
+        // single vision call per round: whole grid, per-tile boolean array back
         let clicks = [];
-        if (cols > 0 && round > 1) {
-          log.push(`r${round}:mode=per-tile ${cols}x${rows}`);
-          const cellW = shotW / cols, cellH = shotH / rows;
-          const jobs = [];
-          for (let iy = 0; iy < rows; iy++) {
-            for (let ix = 0; ix < cols; ix++) {
-              jobs.push({ ix, iy });
+        const m = models[(round - 1) % models.length];
+        const c = cols || 3, r = rows || 3;
+        const raw = await arVision({
+          imageB64: shot.toString('base64'),
+          prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
+          key, model: m,
+        });
+        const parsed = parseJsonLoose(raw) || {};
+        if (Array.isArray(parsed.tiles) && parsed.tiles.length) {
+          parsed.tiles.forEach((v, i) => {
+            if (v === true) {
+              const ix = i % c, iy = Math.floor(i / c);
+              clicks.push({ x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) });
             }
-          }
-          // ask the model per tile, small parallel burst
-          const answers = await Promise.all(jobs.map(async ({ ix, iy }) => {
-            const crop = await sharpCrop(shot, Math.round(ix * cellW), Math.round(iy * cellH), Math.round(cellW), Math.round(cellH));
-            const b64 = crop.toString('base64');
-            const prompt = TILE_PROMPT(instruction.replace(/\s+/g, ' ').trim(), ix, iy, cols, rows);
-            const m = models[(round - 2) % models.length]; // one model per round, rotating
-            try {
-              const raw = await arVision({ imageB64: b64, prompt, key, model: m });
-              const p = parseJsonLoose(raw);
-              return { ix, iy, match: !!(p && p.match) };
-            } catch { return { ix, iy, match: false }; }
-          }));
-          clicks = answers.filter((a) => a.match)
-            .map((a) => ({ x: Math.round(((a.ix + 0.5) / cols) * 1000), y: Math.round(((a.iy + 0.5) / rows) * 1000) }));
-        } else {
-          const raw = await arVision({
-            imageB64: shot.toString('base64'),
-            prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim()),
-            key, model,
           });
-          const parsed = parseJsonLoose(raw) || { clicks: [] };
-          clicks = Array.isArray(parsed.clicks)
-            ? parsed.clicks.filter((c) => Number.isFinite(c?.x) && Number.isFinite(c?.y)).slice(0, 20)
-            : [];
+        } else if (Array.isArray(parsed.clicks)) {
+          clicks = parsed.clicks.filter((cc) => Number.isFinite(cc?.x) && Number.isFinite(cc?.y)).slice(0, 20);
         }
-        log.push(`r${round}:clicks=${clicks.length}`);
+        clicks = clicks.slice(0, c * r);
+        log.push(`r${round}:model=${m}:clicks=${clicks.length}`);
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.png`, shot); } catch {}
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
