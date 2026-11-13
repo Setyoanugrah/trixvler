@@ -107,7 +107,7 @@ async function clickAt(challenge, loc, nx, ny) {
 }
 
 
-async function waitAllDeselected(challenge, maxMs = 15000) {
+async function waitAllDeselected(challenge, maxMs = 8000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
     try {
@@ -132,7 +132,7 @@ async function shotIsBlank(buf) {
   } catch { return false; }
 }
 
-async function waitTileRender(challenge, imgLoc, maxMs = 12000) {
+async function waitTileRender(challenge, imgLoc, maxMs = 8000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
     await sleep(800);
@@ -163,7 +163,7 @@ async function isExpired(challenge) {
 }
 
 
-async function waitTileReplaced(challenge, maxMs = 12000) {
+async function waitTileReplaced(challenge, maxMs = 9000) {
   try {
     const before = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
       (els) => els.map((e) => e.getAttribute('src') || ''));
@@ -303,10 +303,17 @@ export async function solveRecaptcha(opts = {}) {
         const bodyTxt = await challenge.locator('body').innerText().catch(() => '');
         if (/unusual traffic/i.test(bodyTxt)) throw new Error('blocked-unusual-traffic');
         if (await isExpired(challenge) || Date.now() - challengeStart > challengeDeadlineMs) {
-          log.push(`r${round}:${await isExpired(challenge) ? 'expired' : 'deadline'}`);
+          const why = (await isExpired(challenge)) ? 'expired' : 'deadline';
+          log.push(`r${round}:${why}`);
           const reload = challenge.locator('#recaptcha-reload-button, .rc-button-reload').first();
-          await reload.click({ force: true }).catch(() => {});
-          await sleep(rnd(1500, 2500));
+          const clicked = await rawClickFrame(page, challenge, reload).catch(() => false);
+          if (!clicked) {
+            // reload button unreachable -> nuke the whole widget: uncheck + recheck the anchor
+            await anchor.locator('#recaptcha-anchor').click({ delay: rnd(40, 100) }).catch(() => {});
+            await sleep(1200);
+            await anchor.locator('#recaptcha-anchor').click({ delay: rnd(40, 100) }).catch(() => {});
+          }
+          await sleep(rnd(2000, 3000));
           challengeStart = Date.now();
           continue;
         }
@@ -384,30 +391,7 @@ export async function solveRecaptcha(opts = {}) {
           clicks = [picked];
           log.push(`r${round}:model=${m}:pick=tile${picked.idx}`);
         } else {
-          // guard against judging a mid-transition grid: one extra render wait + re-judge with luna
-          await waitTileRender(challenge, imgLoc, 10000);
-          let reparsed = null;
-          try {
-            const raw2 = await arVision({
-              imageB64: shot.toString('base64'),
-              prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
-              key, model: 'free/gpt-6-luna',
-            });
-            reparsed = parseJsonLoose(raw2);
-          } catch {}
-          if (reparsed && Array.isArray(reparsed.tiles)) {
-            const idx = reparsed.tiles.findIndex((v) => v === true);
-            if (idx >= 0) {
-              const ix = idx % c, iy = Math.floor(idx / c);
-              picked = { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
-              clicks = [picked];
-              log.push(`r${round}:rejudge-luna:pick=tile${picked.idx}`);
-            } else {
-              log.push(`r${round}:none-confirmed`);
-            }
-          } else {
-            log.push(`r${round}:none`);
-          }
+          log.push(`r${round}:none-confirmed`);
         }
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
