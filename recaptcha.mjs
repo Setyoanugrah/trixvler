@@ -107,6 +107,18 @@ async function clickAt(challenge, loc, nx, ny) {
 }
 
 
+async function waitAllDeselected(challenge, maxMs = 15000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < maxMs) {
+    try {
+      const n = await challenge.locator('.rc-imageselect-tileselected, td[aria-checked="true"]').count();
+      if (n === 0) return true;
+    } catch {}
+    await sleep(700);
+  }
+  return false;
+}
+
 async function waitTileRender(challenge, imgLoc, maxMs = 7000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
@@ -321,6 +333,7 @@ export async function solveRecaptcha(opts = {}) {
         if (solved) break;
         advanced = true;
         await sleep(rnd(800, 1600));
+        await waitAllDeselected(challenge); // old checkmarks must be gone first
         await waitTileRender(challenge, imgLoc); // next round fades in 5-7s
       }
       if (!solved) throw new Error('challenge-not-solved rounds=' + rounds + ' log=' + log.join('|'));
