@@ -217,6 +217,10 @@ $('solve').onclick = async () => {
     $('src').innerHTML = '<span class="badge err">error</span>';
   } finally {
     $('solve').disabled = false;
+    loadStats();
+  }
+};
+
 $('ts-solve').onclick = async () => {
   const url = $('ts-url').value.trim();
   if (!url) return;
@@ -249,10 +253,6 @@ $('ts-copy').onclick = async () => {
     const j = JSON.parse($('ts-out').textContent);
     if (j.token) await navigator.clipboard.writeText(j.token);
   } catch {}
-};
-
-loadStats();
-  }
 };
 
 loadStats();
