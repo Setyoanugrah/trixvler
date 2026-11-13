@@ -24,6 +24,9 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
 
+      - name: Install browser
+        run: npx patchright install --with-deps chromium
+
       - name: Test
         run: npm test
 
@@ -83,9 +86,9 @@ jobs:
             echo "- Auth: \`Authorization: Bearer <TRIXVLER_KEY>\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          for i in $(seq 1 350); do
+          for i in $(seq 1 340); do
             sleep 60
-            if [ "$i" -eq 345 ] && [ -n "${GH_PAT:-}" ]; then
+            if [ "$i" -eq 335 ] && [ -n "${GH_PAT:-}" ]; then
               echo "self-redispatch at minute $i"
               curl -fsS -X POST \
                 -H "Authorization: Bearer $GH_PAT" \
