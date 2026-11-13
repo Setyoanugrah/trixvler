@@ -119,6 +119,31 @@ async function clickAt(challenge, loc, nx, ny) {
   await sleep(rnd(150, 450));
 }
 
+
+async function waitTileRender(challenge, imgLoc, maxMs = 12000) {
+  const t0 = Date.now();
+  let prev = null;
+  while (Date.now() - t0 < maxMs) {
+    await sleep(1200);
+    try {
+      // all tile <img> elements must have a loaded src
+      const srcs = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
+        (els) => els.map((e) => e.getAttribute('src') || ''));
+      if (srcs.length && srcs.every((x) => x && x.length > 50)) {
+        const cur = await pageScreenshotFast(challenge);
+        if (prev && cur.equals(prev)) return true; // stable: same bytes twice in a row
+        prev = cur;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+async function pageScreenshotFast(challenge) {
+  const page = challenge.page();
+  return page.screenshot({ type: 'png', animations: 'disabled' });
+}
+
 async function anchorChecked(anchor) {
   try {
     return (await anchor.locator('#recaptcha-anchor[aria-checked="true"]').count()) > 0;
@@ -196,7 +221,7 @@ export async function solveRecaptcha(opts = {}) {
         rounds = round;
         const imgLoc = await findImageLoc(challenge);
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
-        await sleep(rnd(600, 1400));
+        await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s; screenshot only when stable
 
         // unusual-traffic block check
         const bodyTxt = await challenge.locator('body').innerText().catch(() => '');
@@ -298,6 +323,7 @@ export async function solveRecaptcha(opts = {}) {
         if (solved) break;
         advanced = true;
         await sleep(rnd(800, 1600));
+        await waitTileRender(challenge, imgLoc); // next round fades in 5-7s
       }
       if (!solved) throw new Error('challenge-not-solved rounds=' + rounds + ' log=' + log.join('|'));
     }
