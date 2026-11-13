@@ -72,8 +72,7 @@ const server = http.createServer(async (req, res) => {
      sitekey: j.sitekey,
      pageurl: j.pageurl,
      maxRounds: j.maxRounds,
-     model: process.env.AGENTROUTER_MODEL,
-    });
+     });
     stats.rcTotal++;
     if (out.ok) stats.rcOk++;
     stats.msSum += Date.now() - t0;

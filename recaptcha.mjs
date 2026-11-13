@@ -1,8 +1,7 @@
 import http from 'node:http';
 import { chromium } from 'patchright';
 
-const AR_UA = 'claude-cli/1.0.83 (external, cli)';
-const AR_URL = 'https://agentrouter.org/v1/responses';
+const APINEX_URL = 'https://api.apinex.bond/v1/chat/completions';
 export const DEMO_SITEKEY = '6Le-wvkSAAAAAPBMRTvw0Q4Muexq9bi0DJwx_mJ-';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -40,16 +39,11 @@ async function arVision({ imageB64, prompt, key, model, timeoutMs = 120000 }) {
     body,
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw new Error(`agentrouter-http-${res.status}: ${(await res.text()).slice(0, 180)}`);
+  if (!res.ok) throw new Error(`apinex-http-${res.status}: ${(await res.text()).slice(0, 180)}`);
   const rawBody = await res.text();
   let j;
-  try { j = JSON.parse(rawBody); } catch { throw new Error('agentrouter-non-json: ' + rawBody.slice(0, 150)); }
-  let txt = '';
-  for (const item of j.output || []) {
-    if (item.type !== 'message') continue;
-    for (const c of item.content || []) if (c.type === 'output_text') txt += c.text || '';
-  }
-  return txt.trim();
+  try { j = JSON.parse(rawBody); } catch { throw new Error('apinex-non-json: ' + rawBody.slice(0, 150)); }
+  return (j?.choices?.[0]?.message?.content || '').trim();
 }
 
 const VISION_PROMPT = [
@@ -96,9 +90,9 @@ async function anchorChecked(anchor) {
 export async function solveRecaptcha(opts = {}) {
   const sitekey = opts.sitekey;
   if (!sitekey) throw new Error('missing-sitekey');
-  const key = opts.apiKey || process.env.AGENTROUTER_KEY;
-  if (!key) throw new Error('missing-agentrouter-key');
-  const model = opts.model || process.env.AGENTROUTER_MODEL || 'gpt-6.1-sol';
+  const key = opts.apiKey || process.env.APINEX_KEY;
+  if (!key) throw new Error('missing-apinex-key');
+  const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
   const maxRounds = Math.min(Number(opts.maxRounds) || 8, 15);
   const t0 = Date.now();
   const log = [];
