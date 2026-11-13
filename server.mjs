@@ -87,7 +87,7 @@ const server = http.createServer(async (req, res) => {
         debug: !!j.debug,
         timeoutMs: Math.max(5000, Math.min(Number(j.timeout || 60) * 1000, 180000)),
       });
-      stats.turnstile++;
+      if (out.token) stats.turnstile++;
       return send(res, 200, out);
     } catch (e) {
       return send(res, 400, { error: e.message });
