@@ -41,7 +41,9 @@ async function arVision({ imageB64, prompt, key, model, timeoutMs = 120000 }) {
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`agentrouter-http-${res.status}: ${(await res.text()).slice(0, 180)}`);
-  const j = await res.json();
+  const rawBody = await res.text();
+  let j;
+  try { j = JSON.parse(rawBody); } catch { throw new Error('agentrouter-non-json: ' + rawBody.slice(0, 150)); }
   let txt = '';
   for (const item of j.output || []) {
     if (item.type !== 'message') continue;
