@@ -82,8 +82,10 @@ const server = http.createServer(async (req, res) => {
         sitekey: j.sitekey,
         action: j.action,
         cdata: j.cdata,
-        proxy: j.proxy,
+        proxy: j.proxy || process.env.TURNSTILE_PROXY,
         cookies: j.cookies,
+        userAgent: j.userAgent,
+        headless: typeof j.headless === 'boolean' ? j.headless : undefined,
         debug: !!j.debug,
         timeoutMs: Math.max(5000, Math.min(Number(j.timeout || 60) * 1000, 180000)),
       });

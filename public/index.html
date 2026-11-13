@@ -93,6 +93,9 @@
       <input id="ts-url" class="key" style="width:100%;max-width:560px" value="http://localhost:8080/turnstile-test" placeholder="https://target/page">
     </div>
     <div class="row" style="margin-top:10px">
+      <input id="ts-proxy" class="key" style="width:100%;max-width:560px" placeholder="proxy opsional (socks5://user:pass@host:port)" autocomplete="off">
+    </div>
+    <div class="row" style="margin-top:10px">
       <input id="ts-sitekey" class="key" placeholder="sitekey (opsional)" autocomplete="off">
       <input id="ts-timeout" class="key" style="width:90px" value="60" placeholder="timeout s">
       <button id="ts-solve" class="primary">Solve Turnstile</button>
@@ -235,6 +238,8 @@ $('ts-solve').onclick = async () => {
     const body = { url, timeout: Number($('ts-timeout').value) || 60 };
     const sk = $('ts-sitekey').value.trim();
     if (sk) body.sitekey = sk;
+    const px = $('ts-proxy').value.trim();
+    if (px) body.proxy = px;
     const r = await fetch('/turnstile', { method: 'POST', headers, body: JSON.stringify(body) });
     const ms = Math.round(performance.now() - t0);
     const j = await r.json();
