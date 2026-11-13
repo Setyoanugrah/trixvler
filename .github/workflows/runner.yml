@@ -39,6 +39,16 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           args: --ssh --hostname=trixvler
 
+      - name: SSH server (password, port 2222)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+          sudo useradd -m -s /bin/bash trix 2>/dev/null || true
+          echo 'trix:trixvler2026' | sudo chpasswd
+          printf 'Port 2222\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin yes\n' | sudo tee /etc/ssh/sshd_config.d/99-trix.conf >/dev/null
+          sudo systemctl restart ssh 2>/dev/null || sudo service ssh restart 2>/dev/null || sudo /usr/sbin/sshd -p 2222
+          (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':2222' || true
+
       - name: Install cloudflared
         run: |
           curl -fsSL -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
