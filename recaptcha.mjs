@@ -71,7 +71,8 @@ function visionPrompt(instruction, cols, rows) {
     '',
     `The image is a ${cols}x${rows} grid of ${n} photo tiles, indexed 0-${n - 1} in reading order (0 = top-left, across each row).`,
     'The tiles may be distorted (posterized, edge-enhanced, noisy) on purpose - judge the CONTENT through the distortion.',
-    'Select a tile if ANY significant part of the requested object appears in it - partial views count (a wheel, a bumper, a fragment of a sign).',
+    'Select a tile ONLY if the requested object is clearly and unambiguously visible in it. Partial views count when the object is unmistakable (a whole wheel with its arch, a bus windshield).',
+    'Do NOT select tiles that are ambiguous, blurred, mostly background, or where you only suspect the object might be. Precision matters more than recall.',
     'Do NOT select tiles showing only background: grass, sky, road, water, walls, fences.',
     'Do NOT select tiles already marked with a blue/white checkmark overlay.',
     '',
@@ -212,7 +213,7 @@ export async function solveRecaptcha(opts = {}) {
     'free/qwen-3.8-max',
     'free/kimi-k3',
   ];
-  const models = FREE_VISION.includes(model) ? FREE_VISION : [model, ...FREE_VISION];
+  const models = FREE_VISION.includes(model) ? ['free/gpt-6-luna', ...FREE_VISION] : [model];
   const challengeDeadlineMs = 150000; // recaptcha expires in ~2-5min; stay under it
   let challengeStart = Date.now();
   const maxRounds = Math.min(Number(opts.maxRounds) || 8, 15);
