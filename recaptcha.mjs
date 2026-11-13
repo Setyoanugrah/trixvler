@@ -1,6 +1,21 @@
 import http from 'node:http';
 import { chromium } from 'patchright';
 
+import { PNG } from 'pngjs';
+
+async function sharpCrop(buf, x, y, w, h) {
+  const img = PNG.sync.read(buf);
+  const cw = Math.max(1, Math.min(w, img.width - x));
+  const ch = Math.max(1, Math.min(h, img.height - y));
+  const out = new PNG({ width: cw, height: ch });
+  for (let ry = 0; ry < ch; ry++) {
+    const src = ((y + ry) * img.width + x) * 4;
+    img.data.copy(out.data, ry * cw * 4, src, src + cw * 4);
+  }
+  return PNG.sync.write(out);
+}
+
+
 const APINEX_URL = 'https://api.apinex.bond/v1/chat/completions';
 export const DEMO_SITEKEY = '6Le-wvkSAAAAAPBMRTvw0Q4Muexq9bi0DJwx_mJ-';
 
@@ -168,7 +183,22 @@ export async function solveRecaptcha(opts = {}) {
         const bodyTxt = await challenge.locator('body').innerText().catch(() => '');
         if (/unusual traffic/i.test(bodyTxt)) throw new Error('blocked-unusual-traffic');
 
-        const shot = await imgLoc.screenshot({ type: 'png' });
+        // full-page screenshot + crop to the challenge image box (locator.screenshot
+        // hangs on "element to be stable" because tiles keep animating)
+        const vp = page.viewportSize(); const pageW = vp.width, pageH = vp.height;
+        const pageBuf = await page.screenshot({ type: 'png', animations: 'disabled' });
+        let shot = pageBuf;
+        try {
+          const frameEl = await challenge.frameElement();
+          const fb = await frameEl.boundingBox();
+          const bb = await imgLoc.boundingBox();
+          if (fb && bb) {
+            const gx = Math.max(0, Math.round(fb.x + bb.x)), gy = Math.max(0, Math.round(fb.y + bb.y));
+            const gw = Math.min(pageW - gx, Math.round(bb.width)), gh = Math.min(pageH - gy, Math.round(bb.height));
+            shot = await sharpCrop(pageBuf, gx, gy, gw, gh);
+          }
+        } catch {}
+
         const raw = await arVision({
           imageB64: shot.toString('base64'),
           prompt: VISION_PROMPT,
