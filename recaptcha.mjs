@@ -287,8 +287,8 @@ export async function solveRecaptcha(opts = {}) {
               try {
                 const bodyT = await f.locator('body').innerText().catch(() => '');
                 if (/verification expired/i.test(bodyT)) continue; // dead frame - keep polling
-                const vis = await f.locator('.rc-imageselect-target, .rc-image-tile-wrapper').first().isVisible().catch(() => false);
-                if (vis) { refound = true; break; }
+                const tiles = await f.locator('.rc-image-tile-wrapper').count().catch(() => 0);
+                if (tiles >= 4) { refound = true; break; } // real grid, not an empty container
               } catch {}
             }
             await sleep(500);
@@ -298,7 +298,14 @@ export async function solveRecaptcha(opts = {}) {
         }
         const imgLoc = await findImageLoc(challenge);
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
-        await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s; screenshot only when stable
+        const rendered = await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s
+        if (!rendered) {
+          const nTiles = await challenge.locator('.rc-image-tile-wrapper').count().catch(() => 0);
+          log.push(`r${round}:not-rendered:tiles=${nTiles}`);
+          await sleep(rnd(1200, 2000));
+          challengeStart = Date.now();
+          continue; // no grid -> never send a blank image to the vision model
+        }
         await waitAllDeselected(challenge); // never judge while any tile is still checkmarked
 
         // unusual-traffic / expiry checks
