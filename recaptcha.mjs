@@ -162,6 +162,22 @@ async function isExpired(challenge) {
   } catch { return false; }
 }
 
+
+async function waitTileReplaced(challenge, maxMs = 12000) {
+  try {
+    const before = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
+      (els) => els.map((e) => e.getAttribute('src') || ''));
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      await sleep(900);
+      const after = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
+        (els) => els.map((e) => e.getAttribute('src') || ''));
+      if (after.length && after.some((v, i) => v !== before[i])) return true; // at least one tile replaced
+    }
+  } catch {}
+  return false;
+}
+
 async function anchorChecked(anchor) {
   try {
     return (await anchor.locator('#recaptcha-anchor[aria-checked="true"]').count()) > 0;
@@ -318,40 +334,45 @@ export async function solveRecaptcha(opts = {}) {
           else if (tiles === 4) { cols = 2; rows = 2; }
         } catch {}
 
-        // single vision call per round: whole grid, per-tile boolean array back
+        // DYNAMIC mode: one vision call = pick ONE most-confident matching tile,
+        // click it, wait for the tile to be replaced (5-7s), re-screenshot, repeat.
+        // When the model finds no match left -> VERIFY.
         let clicks = [];
         const c = cols || 3, r = rows || 3;
-        let parsed = null, raw = '', m = models[0];
+        let picked = null;
+        let m = models[0];
+        let parsed_log = '';
         for (let attempt = 0; attempt < Math.min(3, models.length); attempt++) {
           m = models[(round - 1 + attempt) % models.length];
           try {
-            raw = await arVision({
+            const raw = await arVision({
               imageB64: shot.toString('base64'),
               prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
               key, model: m,
             });
-            parsed = parseJsonLoose(raw);
-            if (parsed && Array.isArray(parsed.tiles) && parsed.tiles.length === c * r) break;
-          } catch { parsed = null; }
-          parsed = null; // force retry with next model on invalid/missing tiles
-        }
-        parsed = parsed || {};
-        if (Array.isArray(parsed.tiles) && parsed.tiles.length) {
-          parsed.tiles.forEach((v, i) => {
-            if (v === true) {
-              const ix = i % c, iy = Math.floor(i / c);
-              clicks.push({ x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) });
+            const parsed = parseJsonLoose(raw);
+            if (parsed && Array.isArray(parsed.tiles) && parsed.tiles.length === c * r) {
+              const idx = parsed.tiles.findIndex((v) => v === true);
+              if (idx >= 0) {
+                const ix = idx % c, iy = Math.floor(idx / c);
+                picked = { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
+              }
+              try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw, tiles: parsed.tiles })); } catch {}
+              break;
             }
-          });
-        } else if (Array.isArray(parsed.clicks)) {
-          clicks = parsed.clicks.filter((cc) => Number.isFinite(cc?.x) && Number.isFinite(cc?.y)).slice(0, 20);
+          } catch {}
+          parsed_log = raw; // keep last raw for debug
         }
-        clicks = clicks.slice(0, c * r);
-        log.push(`r${round}:model=${m}:clicks=${clicks.length}:tiles=${JSON.stringify(parsed.tiles || [])}:instr=${(instruction || '').replace(/\s+/g, ' ').slice(0, 60)}`);
-        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw, tiles: parsed.tiles || null })); } catch {}
-        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.png`, shot); } catch {}
+        if (picked) {
+          clicks = [picked];
+          log.push(`r${round}:model=${m}:pick=tile${picked.idx}`);
+        } else {
+          log.push(`r${round}:model=${m}:none`);
+        }
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
+        // dynamic grids replace the clicked tile with a fresh image after ~5-7s
+        await waitTileReplaced(challenge);
         await sleep(rnd(700, 1500));
 
         // no matching tile -> SKIP; otherwise VERIFY
