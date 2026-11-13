@@ -70,20 +70,15 @@ async function injectWidget(page, sitekey, action, cdata) {
     !!document.querySelector('[name="cf-turnstile-response"], .cf-turnstile, [data-sitekey]')
   ).catch(() => false);
   if (has) return;
-  await page.evaluate(({ sk, act, cd }) => {
-    const d = document.createElement('div');
-    d.className = 'cf-turnstile';
-    d.dataset.sitekey = sk;
-    if (act) d.dataset.action = act;
-    if (cd) d.dataset.cdata = cd;
-    document.body.appendChild(d);
-    const render = () => { try { window.turnstile.render(d, { sitekey: sk, action: act, cdata: cd }); } catch {} };
-    if (window.turnstile) return render();
-    window.__trixTsReady = render;
-    const s = document.createElement('script');
-    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=__trixTsReady';
-    document.head.appendChild(s);
-  }, { sk: sitekey, act: action, cd: cdata }).catch(() => {});
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const attrs = [`data-sitekey="${esc(sitekey)}"`];
+  if (action) attrs.push(`data-action="${esc(action)}"`);
+  if (cdata) attrs.push(`data-cdata="${esc(cdata)}"`);
+  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body>` +
+    `<div class="cf-turnstile" ${attrs.join(' ')}></div>` +
+    `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>` +
+    `</body></html>`;
+  await page.setContent(html, { waitUntil: 'domcontentloaded' }).catch(() => {});
 }
 
 async function diagnostics(page) {
