@@ -58,7 +58,6 @@
       <div class="stat"><i>local</i><b id="s-local">-</b></div>
       <div class="stat"><i>ai</i><b id="s-ai">-</b></div>
       <div class="stat"><i>tie</i><b id="s-tie">-</b></div>
-      <div class="stat"><i>turnstile</i><b id="s-ts">-</b></div>
       <div class="stat"><i>avg ms</i><b id="s-ms">-</b></div>
     </div>
   </section>
@@ -85,24 +84,6 @@
       <b>Result</b><span id="src"></span><div class="grow"></div><span id="pick" class="mut"></span>
     </div>
     <pre id="out">-</pre>
-  </section>
-
-  <section class="card">
-    <b>Turnstile</b>
-    <div class="row" style="margin-top:10px">
-      <input id="ts-url" class="key" style="width:100%;max-width:560px" value="http://localhost:8080/turnstile-test" placeholder="https://target/page">
-    </div>
-    <div class="row" style="margin-top:10px">
-      <input id="ts-proxy" class="key" style="width:100%;max-width:560px" placeholder="proxy opsional (socks5://user:pass@host:port)" autocomplete="off">
-    </div>
-    <div class="row" style="margin-top:10px">
-      <input id="ts-sitekey" class="key" placeholder="sitekey (opsional)" autocomplete="off">
-      <input id="ts-timeout" class="key" style="width:90px" value="60" placeholder="timeout s">
-      <button id="ts-solve" class="primary">Solve Turnstile</button>
-      <button id="ts-copy" disabled>Copy token</button>
-      <span id="ts-lat" class="mut"></span>
-    </div>
-    <pre id="ts-out" style="margin-top:12px">-</pre>
   </section>
 
   <section class="card">
@@ -173,7 +154,6 @@ async function loadStats() {
     $('s-local').textContent = s.local ?? 0;
     $('s-ai').textContent = s.ai ?? 0;
     $('s-tie').textContent = s.tie ?? 0;
-    $('s-ts').textContent = s.turnstile ?? 0;
     $('s-ms').textContent = s.avgMs ?? 0;
   } catch {}
 }
@@ -222,42 +202,6 @@ $('solve').onclick = async () => {
     $('solve').disabled = false;
     loadStats();
   }
-};
-
-$('ts-solve').onclick = async () => {
-  const url = $('ts-url').value.trim();
-  if (!url) return;
-  $('ts-solve').disabled = true;
-  $('ts-lat').textContent = 'solving...';
-  $('ts-copy').disabled = true;
-  const t0 = performance.now();
-  try {
-    const headers = { 'content-type': 'application/json' };
-    const k = keyEl.value.trim();
-    if (k) headers['authorization'] = 'Bearer ' + k;
-    const body = { url, timeout: Number($('ts-timeout').value) || 60 };
-    const sk = $('ts-sitekey').value.trim();
-    if (sk) body.sitekey = sk;
-    const px = $('ts-proxy').value.trim();
-    if (px) body.proxy = px;
-    const r = await fetch('/turnstile', { method: 'POST', headers, body: JSON.stringify(body) });
-    const ms = Math.round(performance.now() - t0);
-    const j = await r.json();
-    $('ts-lat').textContent = ms + ' ms';
-    $('ts-out').textContent = JSON.stringify(j, null, 2);
-    $('ts-copy').disabled = !(r.ok && j.token);
-  } catch (e) {
-    $('ts-out').textContent = 'Error: ' + e.message;
-  } finally {
-    $('ts-solve').disabled = false;
-    loadStats();
-  }
-};
-$('ts-copy').onclick = async () => {
-  try {
-    const j = JSON.parse($('ts-out').textContent);
-    if (j.token) await navigator.clipboard.writeText(j.token);
-  } catch {}
 };
 
 loadStats();

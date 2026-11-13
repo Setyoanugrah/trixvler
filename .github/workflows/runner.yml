@@ -74,8 +74,6 @@ jobs:
           APINEX_MODEL: ${{ vars.APINEX_MODEL }}
           CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
-          TURNSTILE_HEADED: "1"
-          TURNSTILE_PROXY: ${{ secrets.TURNSTILE_PROXY }}
         run: |
           set -u
           xvfb-run -a node server.mjs > server.log 2>&1 &

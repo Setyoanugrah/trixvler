@@ -3,14 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { solve } from './trixvler.mjs';
-import { solveTurnstile } from './turnstile.mjs';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.TRIXVLER_KEY || '';
 const DASH = path.join(__dir, 'public', 'index.html');
 
-const stats = { total: 0, local: 0, ai: 0, tie: 0, msSum: 0, turnstile: 0 };
+const stats = { total: 0, local: 0, ai: 0, tie: 0, msSum: 0 };
 
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = [];
@@ -56,44 +55,8 @@ const server = http.createServer(async (req, res) => {
       local: stats.local,
       ai: stats.ai,
       tie: stats.tie,
-      turnstile: stats.turnstile,
       avgMs: stats.total ? Math.round(stats.msSum / stats.total) : 0,
     });
-  }
-
-  if (req.method === 'GET' && url === '/turnstile-test') {
-    const q = new URL(req.url || '/', 'http://x');
-    const sk = (q.searchParams.get('sitekey') || '1x00000000000000000000AA').replace(/[^\w-]/g, '');
-    const html = `<!doctype html><meta charset="utf-8"><title>turnstile-test</title>
-<div class="cf-turnstile" data-sitekey="${sk}"></div>
-<pre id="t">waiting...</pre>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<script>setInterval(function(){var e=document.querySelector('[name="cf-turnstile-response"]');document.getElementById('t').textContent=e&&e.value?('TOKEN '+e.value):'waiting...';},400);</script>`;
-    return send(res, 200, html, 'text/html; charset=utf-8');
-  }
-
-  if (req.method === 'POST' && url === '/turnstile') {
-    if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
-    try {
-      const j = JSON.parse((await readBody(req)).toString('utf8'));
-      if (!j.url) return send(res, 400, { error: 'missing-url' });
-      const out = await solveTurnstile({
-        url: j.url,
-        sitekey: j.sitekey,
-        action: j.action,
-        cdata: j.cdata,
-        proxy: j.proxy || process.env.TURNSTILE_PROXY,
-        cookies: j.cookies,
-        userAgent: j.userAgent,
-        headless: typeof j.headless === 'boolean' ? j.headless : undefined,
-        debug: !!j.debug,
-        timeoutMs: Math.max(5000, Math.min(Number(j.timeout || 60) * 1000, 180000)),
-      });
-      if (out.token) stats.turnstile++;
-      return send(res, 200, out);
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
   }
 
   if (req.method !== 'POST' || url !== '/solve') return send(res, 404, { error: 'not-found' });
