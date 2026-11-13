@@ -120,20 +120,14 @@ async function clickAt(challenge, loc, nx, ny) {
 }
 
 
-async function waitTileRender(challenge, imgLoc, maxMs = 12000) {
+async function waitTileRender(challenge, imgLoc, maxMs = 7000) {
   const t0 = Date.now();
-  let prev = null;
   while (Date.now() - t0 < maxMs) {
-    await sleep(1200);
+    await sleep(800);
     try {
-      // all tile <img> elements must have a loaded src
       const srcs = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
         (els) => els.map((e) => e.getAttribute('src') || ''));
-      if (srcs.length && srcs.every((x) => x && x.length > 50)) {
-        const cur = await pageScreenshotFast(challenge);
-        if (prev && cur.equals(prev)) return true; // stable: same bytes twice in a row
-        prev = cur;
-      }
+      if (srcs.length && srcs.every((x) => x && x.length > 50)) return true;
     } catch {}
   }
   return false;
@@ -142,6 +136,13 @@ async function waitTileRender(challenge, imgLoc, maxMs = 12000) {
 async function pageScreenshotFast(challenge) {
   const page = challenge.page();
   return page.screenshot({ type: 'png', animations: 'disabled' });
+}
+
+async function isExpired(challenge) {
+  try {
+    const t = await challenge.locator('body').innerText().catch(() => '') || '';
+    return /verification expired/i.test(t);
+  } catch { return false; }
 }
 
 async function anchorChecked(anchor) {
@@ -158,7 +159,9 @@ export async function solveRecaptcha(opts = {}) {
   const key = opts.apiKey || process.env.APINEX_KEY;
   if (!key) throw new Error('missing-apinex-key');
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
-  const models = [model, 'gpt-6.1-sol'].filter((m, i, a) => a.indexOf(m) === i);
+  const models = [model, 'gpt-6.1-sol'].filter((m, i, a) => a.indexOf(m) === i); // pool for rotation
+  const challengeDeadlineMs = 150000; // recaptcha expires in ~2-5min; stay under it
+  let challengeStart = Date.now();
   const maxRounds = Math.min(Number(opts.maxRounds) || 8, 15);
   const t0 = Date.now();
   const log = [];
@@ -223,9 +226,17 @@ export async function solveRecaptcha(opts = {}) {
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
         await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s; screenshot only when stable
 
-        // unusual-traffic block check
+        // unusual-traffic / expiry checks
         const bodyTxt = await challenge.locator('body').innerText().catch(() => '');
         if (/unusual traffic/i.test(bodyTxt)) throw new Error('blocked-unusual-traffic');
+        if (await isExpired(challenge) || Date.now() - challengeStart > challengeDeadlineMs) {
+          log.push(`r${round}:${await isExpired(challenge) ? 'expired' : 'deadline'}`);
+          const reload = challenge.locator('#recaptcha-reload-button, .rc-button-reload').first();
+          await reload.click({ force: true }).catch(() => {});
+          await sleep(rnd(1500, 2500));
+          challengeStart = Date.now();
+          continue;
+        }
 
         // the actual task text, e.g. "Select all images with traffic lights"
         const instruction = await challenge
@@ -275,14 +286,12 @@ export async function solveRecaptcha(opts = {}) {
             const crop = await sharpCrop(shot, Math.round(ix * cellW), Math.round(iy * cellH), Math.round(cellW), Math.round(cellH));
             const b64 = crop.toString('base64');
             const prompt = TILE_PROMPT(instruction.replace(/\s+/g, ' ').trim(), ix, iy, cols, rows);
-            const votes = await Promise.all(models.map(async (m) => {
-              try {
-                const raw = await arVision({ imageB64: b64, prompt, key, model: m });
-                const p = parseJsonLoose(raw);
-                return !!(p && p.match);
-              } catch { return false; }
-            }));
-            return { ix, iy, match: votes.some(Boolean), votes };
+            const m = models[(round - 2) % models.length]; // one model per round, rotating
+            try {
+              const raw = await arVision({ imageB64: b64, prompt, key, model: m });
+              const p = parseJsonLoose(raw);
+              return { ix, iy, match: !!(p && p.match) };
+            } catch { return { ix, iy, match: false }; }
           }));
           clicks = answers.filter((a) => a.match)
             .map((a) => ({ x: Math.round(((a.ix + 0.5) / cols) * 1000), y: Math.round(((a.iy + 0.5) / rows) * 1000) }));
