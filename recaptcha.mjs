@@ -178,6 +178,19 @@ async function waitTileReplaced(challenge, maxMs = 12000) {
   return false;
 }
 
+
+async function rawClickFrame(page, challenge, loc) {
+  const frameEl = await challenge.frameElement();
+  const fb = await frameEl.boundingBox();
+  const b = await loc.boundingBox().catch(() => null);
+  if (!fb || !b) return false;
+  await page.mouse.move(fb.x + b.x + b.width / 2, fb.y + b.y + b.height / 2, { steps: 4 });
+  await page.mouse.down();
+  await sleep(rnd(30, 70));
+  await page.mouse.up();
+  return true;
+}
+
 async function anchorChecked(anchor) {
   try {
     return (await anchor.locator('#recaptcha-anchor[aria-checked="true"]').count()) > 0;
@@ -400,10 +413,10 @@ export async function solveRecaptcha(opts = {}) {
         // no matching tile -> SKIP; otherwise VERIFY
         if (clicks.length === 0) {
           const skip = challenge.locator('.rc-imageselect-button-skip, button:has-text("SKIP")').first();
-          if (await skip.isVisible().catch(() => false)) await skip.click({ delay: rnd(30, 90) });
-          else await challenge.locator('.rc-imageselect-verify-button, button:has-text("VERIFY")').first().click({ delay: rnd(30, 90) }).catch(() => {});
+          if (await skip.isVisible().catch(() => false)) await rawClickFrame(page, challenge, skip);
+          else await rawClickFrame(page, challenge, challenge.locator('.rc-imageselect-verify-button, button:has-text("VERIFY")').first()).catch(() => {});
         } else {
-          await challenge.locator('.rc-imageselect-verify-button, button:has-text("VERIFY")').first().click({ delay: rnd(30, 90) }).catch(() => {});
+          await rawClickFrame(page, challenge, challenge.locator('.rc-imageselect-verify-button, button:has-text("VERIFY")').first()).catch(() => {});
         }
 
         // wait for outcome: solved / next round / block
