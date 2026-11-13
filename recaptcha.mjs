@@ -128,8 +128,7 @@ export async function solveRecaptcha(opts = {}) {
       timezoneId: 'America/New_York',
     });
     const page = await ctx.newPage();
-    if (host) await page.goto(`http://${host}/`, { waitUntil: 'load', timeout: 30000 });
-    else await page.setContent(challengeHtml(sitekey), { waitUntil: 'load', timeout: 30000 });
+    await page.goto(`http://127.0.0.1:${wport}/`, { waitUntil: 'load', timeout: 30000 });
 
     // wait for the anchor iframe
     let anchor = null;
