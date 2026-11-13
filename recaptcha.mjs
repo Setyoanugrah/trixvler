@@ -380,10 +380,14 @@ export async function solveRecaptcha(opts = {}) {
             });
             const parsed = parseJsonLoose(raw);
             if (parsed && Array.isArray(parsed.tiles) && parsed.tiles.length === c * r) {
-              const idx = parsed.tiles.findIndex((v) => v === true);
-              if (idx >= 0) {
-                const ix = idx % c, iy = Math.floor(idx / c);
-                picked = { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
+              // click EVERY matching tile this round (not just the first one):
+              // a 3x3 grid with 3 buses needs all 3 selected before VERIFY
+              const idxs = parsed.tiles.map((v, i) => (v === true ? i : -1)).filter((i) => i >= 0);
+              if (idxs.length) {
+                picked = idxs.map((idx) => {
+                  const ix = idx % c, iy = Math.floor(idx / c);
+                  return { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
+                });
               }
               try {
                 fs.mkdirSync('/tmp/rcdebug', { recursive: true });
@@ -396,8 +400,8 @@ export async function solveRecaptcha(opts = {}) {
           } catch {}
         }
         if (picked) {
-          clicks = [picked];
-          log.push(`r${round}:model=${m}:pick=tile${picked.idx}`);
+          clicks = picked;
+          log.push(`r${round}:model=${m}:pick=${picked.map((p) => p.idx).join('+')}`);
         } else {
           log.push(`r${round}:none-confirmed`);
         }
