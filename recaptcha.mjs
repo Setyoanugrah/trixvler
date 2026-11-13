@@ -148,11 +148,11 @@ export async function solveRecaptcha(opts = {}) {
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
   // vision-capable free-pool models; rotation = resilience against per-model throttling
   const FREE_VISION = [
-    'free/gemini-3.8-flash',
-    'free/qwen-3.8-max',
     'free/gpt-6-luna',
-    'free/kimi-k3',
+    'free/gemini-3.8-flash',
     'free/mimo-v2.6-pro',
+    'free/qwen-3.8-max',
+    'free/kimi-k3',
   ];
   const models = FREE_VISION.includes(model) ? FREE_VISION : [model, ...FREE_VISION];
   const challengeDeadlineMs = 150000; // recaptcha expires in ~2-5min; stay under it
@@ -267,14 +267,22 @@ export async function solveRecaptcha(opts = {}) {
 
         // single vision call per round: whole grid, per-tile boolean array back
         let clicks = [];
-        const m = models[(round - 1) % models.length];
         const c = cols || 3, r = rows || 3;
-        const raw = await arVision({
-          imageB64: shot.toString('base64'),
-          prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
-          key, model: m,
-        });
-        const parsed = parseJsonLoose(raw) || {};
+        let parsed = null, raw = '', m = models[0];
+        for (let attempt = 0; attempt < Math.min(3, models.length); attempt++) {
+          m = models[(round - 1 + attempt) % models.length];
+          try {
+            raw = await arVision({
+              imageB64: shot.toString('base64'),
+              prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
+              key, model: m,
+            });
+            parsed = parseJsonLoose(raw);
+            if (parsed && Array.isArray(parsed.tiles) && parsed.tiles.length === c * r) break;
+          } catch { parsed = null; }
+          parsed = null; // force retry with next model on invalid/missing tiles
+        }
+        parsed = parsed || {};
         if (Array.isArray(parsed.tiles) && parsed.tiles.length) {
           parsed.tiles.forEach((v, i) => {
             if (v === true) {
