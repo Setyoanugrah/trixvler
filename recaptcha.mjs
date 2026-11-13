@@ -141,10 +141,9 @@ async function waitTileRender(challenge, imgLoc, maxMs = 8000) {
       const ok = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
         (els) => els.length > 0 && els.every((e) => e.complete && e.naturalWidth > 10));
       if (!ok) continue;
-      // blank-guard: screenshot must actually contain image content
-      const page = challenge.page();
-      const buf = await page.screenshot({ type: 'png', animations: 'disabled' });
-      if (!shotIsBlank(buf)) return true;
+      // tiles decoded -> ready (blankness is checked later on the CROP, never on the
+      // full page: a small widget on a 480x760 page is >90% white by design)
+      return true;
     } catch {}
   }
   return false;
