@@ -364,48 +364,42 @@ export async function solveRecaptcha(opts = {}) {
           else if (tiles === 4) { cols = 2; rows = 2; }
         } catch {}
 
-        // DYNAMIC mode: one vision call = pick ONE most-confident matching tile,
-        // click it, wait for the tile to be replaced (5-7s), re-screenshot, repeat.
-        // When the model finds no match left -> VERIFY.
-        let clicks = [];
+        // FAST PER-TILE JUDGE: crop every tile, judge all in parallel with a
+        // tiny prompt+image (3.4s/call, all tiles ~4-5s total) - keeps each
+        // click-cycle ~15s so the challenge never expires.
         const c = cols || 3, r = rows || 3;
-        let picked = null;
-        let m = models[0];
-        for (let attempt = 0; attempt < Math.min(3, models.length); attempt++) {
-          m = models[(round - 1 + attempt) % models.length];
+        const cellW = shotW / c, cellH = shotH / r;
+        const tiles = [];
+        for (let iy = 0; iy < r; iy++) for (let ix = 0; ix < c; ix++) tiles.push({ ix, iy });
+        const instructionShort = (instruction || '').replace(/\s+/g, ' ').replace(/Click verify.*$/i, '').trim();
+        const tilePrompt = `Photo tile from a grid challenge. Does this tile contain ${instructionShort}? Reply ONLY JSON {"match":true} or {"match":false}. Partial views count.`;
+        const answers = await Promise.all(tiles.map(async ({ ix, iy }) => {
           try {
-            const raw = await arVision({
-              imageB64: shot.toString('base64'),
-              prompt: visionPrompt(instruction.replace(/\s+/g, ' ').trim(), c, r),
-              key, model: m,
+            const crop = await sharpCrop(shot, Math.round(ix * cellW), Math.round(iy * cellH), Math.round(cellW), Math.round(cellH));
+            const res = await fetch(APINEX_URL, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model, temperature: 0, max_tokens: 20, messages: [{ role: 'user', content: [
+                { type: 'text', text: tilePrompt },
+                { type: 'image_url', image_url: { url: 'data:image/png;base64,' + crop.toString('base64') } } ] }] }),
+              signal: AbortSignal.timeout(30000),
             });
-            const parsed = parseJsonLoose(raw);
-            if (parsed && Array.isArray(parsed.tiles) && parsed.tiles.length === c * r) {
-              // click EVERY matching tile this round (not just the first one):
-              // a 3x3 grid with 3 buses needs all 3 selected before VERIFY
-              const idxs = parsed.tiles.map((v, i) => (v === true ? i : -1)).filter((i) => i >= 0);
-              if (idxs.length) {
-                picked = idxs.map((idx) => {
-                  const ix = idx % c, iy = Math.floor(idx / c);
-                  return { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
-                });
-              }
-              try {
-                fs.mkdirSync('/tmp/rcdebug', { recursive: true });
-                fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw, tiles: parsed.tiles }));
-                fs.writeFileSync(`/tmp/rcdebug/r${round}-crop.png`, shot);
-                fs.writeFileSync(`/tmp/rcdebug/r${round}-full.png`, pageBuf);
-              } catch {}
-              break;
-            }
-          } catch {}
-        }
-        if (picked) {
-          clicks = picked;
-          log.push(`r${round}:model=${m}:pick=${picked.map((p) => p.idx).join('+')}`);
-        } else {
-          log.push(`r${round}:none-confirmed`);
-        }
+            const t = await res.text();
+            let j; try { j = JSON.parse(t); } catch { return { ix, iy, match: false }; }
+            const txt = (j?.choices?.[0]?.message?.content || '').trim();
+            const p = parseJsonLoose(txt);
+            return { ix, iy, match: !!(p && p.match) };
+          } catch { return { ix, iy, match: false }; }
+        }));
+        const matches = answers.filter((a) => a.match);
+        const picked = matches.map((a) => ({
+          idx: a.iy * c + a.ix,
+          x: Math.round(((a.ix + 0.5) / c) * 1000),
+          y: Math.round(((a.iy + 0.5) / r) * 1000),
+        }));
+        log.push(`r${round}:model=${model}:matched=${matches.length}/${c * r}`);
+        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
+
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
         // dynamic grids replace the clicked tile with a fresh image after ~5-7s
