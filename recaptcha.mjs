@@ -24,18 +24,19 @@ function parseJsonLoose(txt) {
 async function arVision({ imageB64, prompt, key, model, timeoutMs = 120000 }) {
   const body = JSON.stringify({
     model,
-    max_output_tokens: 400,
-    input: [{
+    temperature: 0,
+    max_tokens: 500,
+    messages: [{
       role: 'user',
       content: [
-        { type: 'input_text', text: prompt },
-        { type: 'input_image', image_url: 'data:image/png;base64,' + imageB64 },
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,' + imageB64 } },
       ],
     }],
   });
-  const res = await fetch(AR_URL, {
+  const res = await fetch(APINEX_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'User-Agent': AR_UA },
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body,
     signal: AbortSignal.timeout(timeoutMs),
   });
