@@ -370,7 +370,12 @@ export async function solveRecaptcha(opts = {}) {
                 const ix = idx % c, iy = Math.floor(idx / c);
                 picked = { idx, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
               }
-              try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw, tiles: parsed.tiles })); } catch {}
+              try {
+                fs.mkdirSync('/tmp/rcdebug', { recursive: true });
+                fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw, tiles: parsed.tiles }));
+                fs.writeFileSync(`/tmp/rcdebug/r${round}-crop.png`, shot);
+                fs.writeFileSync(`/tmp/rcdebug/r${round}-full.png`, pageBuf);
+              } catch {}
               break;
             }
           } catch {}
