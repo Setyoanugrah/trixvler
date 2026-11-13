@@ -1,4 +1,5 @@
 import http from 'node:http';
+import fs from 'node:fs';
 import { chromium } from 'patchright';
 
 import { PNG } from 'pngjs';
@@ -269,6 +270,7 @@ export async function solveRecaptcha(opts = {}) {
             : [];
         }
         log.push(`r${round}:clicks=${clicks.length}`);
+        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.png`, shot); } catch {}
 
         for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
         await sleep(rnd(700, 1500));
