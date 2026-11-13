@@ -229,6 +229,10 @@ export async function solveRecaptcha(opts = {}) {
     if (!solved && challenge) {
       for (let round = 1; round <= maxRounds; round++) {
         rounds = round;
+        // after each VERIFY the challenge frame may be replaced with a fresh one;
+        // a stale frame reference yields blank screenshots and all-false answers
+        const fresh = page.frames().find((f) => f.url().includes('api2/bframe') && !f.isDetached());
+        if (fresh) challenge = fresh;
         const imgLoc = await findImageLoc(challenge);
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
         await waitTileRender(challenge, imgLoc); // tiles fade in 5-7s; screenshot only when stable
