@@ -87,6 +87,19 @@
   </section>
 
   <section class="card">
+    <div class="row" style="margin-bottom:10px">
+      <b>reCAPTCHA v2</b><span id="rc-status" class="mut">vision solver (agentrouter)</span>
+    </div>
+    <div class="row">
+      <input id="rc-sitekey" class="key" style="width:340px" placeholder="sitekey" autocomplete="off">
+      <input id="rc-pageurl" class="key" style="width:260px" placeholder="pageurl (opsional, domain-lock)" autocomplete="off">
+      <button id="rc-go" class="primary">Solve</button>
+      <span id="rc-lat" class="mut"></span>
+    </div>
+    <pre id="rc-out" style="margin-top:10px">-</pre>
+  </section>
+
+  <section class="card">
     <b>History</b>
     <div id="hist" class="hist" style="margin-top:10px"><span class="mut">belum ada</span></div>
   </section>
@@ -201,6 +214,28 @@ $('solve').onclick = async () => {
   } finally {
     $('solve').disabled = false;
     loadStats();
+  }
+};
+
+$('rc-go').onclick = async () => {
+  const sk = $('rc-sitekey').value.trim();
+  if (!sk) { $('rc-out').textContent = 'sitekey wajib'; return; }
+  $('rc-go').disabled = true;
+  $('rc-lat').textContent = 'solving... (bisa 10-60s)';
+  const t0 = performance.now();
+  try {
+    const headers = { 'content-type': 'application/json' };
+    const k = keyEl.value.trim();
+    if (k) headers['authorization'] = 'Bearer ' + k;
+    const r = await fetch('/recaptcha', { method: 'POST', headers, body: JSON.stringify({ sitekey: sk, pageurl: $('rc-pageurl').value.trim() }) });
+    const j = await r.json();
+    $('rc-lat').textContent = Math.round(performance.now() - t0) + ' ms';
+    $('rc-out').textContent = JSON.stringify(j, null, 2);
+    $('rc-status').innerHTML = r.ok && j.ok ? '<span class="badge local">ok</span>' : '<span class="badge err">fail</span>';
+  } catch (e) {
+    $('rc-out').textContent = 'Error: ' + e.message;
+  } finally {
+    $('rc-go').disabled = false;
   }
 };
 

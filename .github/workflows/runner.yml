@@ -72,6 +72,8 @@ jobs:
           TRIXVLER_KEY: ${{ secrets.TRIXVLER_KEY }}
           APINEX_KEY: ${{ secrets.APINEX_KEY }}
           APINEX_MODEL: ${{ vars.APINEX_MODEL }}
+          AGENTROUTER_KEY: ${{ secrets.AGENTROUTER_KEY }}
+          AGENTROUTER_MODEL: ${{ vars.AGENTROUTER_MODEL || 'gpt-6.1-sol' }}
           CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |

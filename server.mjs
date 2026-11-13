@@ -3,13 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { solve } from './trixvler.mjs';
+import { solveRecaptcha } from './recaptcha.mjs';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.TRIXVLER_KEY || '';
 const DASH = path.join(__dir, 'public', 'index.html');
 
-const stats = { total: 0, local: 0, ai: 0, tie: 0, msSum: 0 };
+const stats = { total: 0, local: 0, ai: 0, tie: 0, rcTotal: 0, rcOk: 0, msSum: 0 };
 
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = [];
@@ -50,13 +51,37 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url === '/health') return send(res, 200, { ok: true });
 
   if (req.method === 'GET' && url === '/stats') {
-    return send(res, 200, {
-      total: stats.total,
-      local: stats.local,
-      ai: stats.ai,
-      tie: stats.tie,
-      avgMs: stats.total ? Math.round(stats.msSum / stats.total) : 0,
+   return send(res, 200, {
+    total: stats.total,
+    local: stats.local,
+    ai: stats.ai,
+    tie: stats.tie,
+    avgMs: stats.total ? Math.round(stats.msSum / stats.total) : 0,
+    rcTotal: stats.rcTotal,
+    rcOk: stats.rcOk,
+   });
+  }
+
+  if (req.method === 'POST' && url === '/recaptcha') {
+   if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+   const t0 = Date.now();
+   try {
+    const body = await readBody(req);
+    const j = JSON.parse(body.toString('utf8'));
+    const out = await solveRecaptcha({
+     sitekey: j.sitekey,
+     pageurl: j.pageurl,
+     maxRounds: j.maxRounds,
+     model: process.env.AGENTROUTER_MODEL,
     });
+    stats.rcTotal++;
+    if (out.ok) stats.rcOk++;
+    stats.msSum += Date.now() - t0;
+    return send(res, 200, out);
+   } catch (e) {
+    stats.rcTotal++;
+    return send(res, 502, { ok: false, error: e.message, ms: Date.now() - t0 });
+   }
   }
 
   if (req.method !== 'POST' || url !== '/solve') return send(res, 404, { error: 'not-found' });
