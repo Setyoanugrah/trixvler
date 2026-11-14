@@ -381,21 +381,27 @@ export async function solveRecaptcha(opts = {}) {
           for (let iy = 0; iy < r; iy++) for (let ix = 0; ix < c; ix++)
             tileBoxes.push({ x: Math.round(ix * cellW), y: Math.round(iy * cellH), w: Math.round(cellW), h: Math.round(cellH) });
         }
+        const JUDGES = ['free/gpt-6-luna', 'free/gemini-3.8-flash'];
         const answers = await Promise.all(tileBoxes.map(async (b, i) => {
           try {
             const crop = await sharpCrop(shot, b.x, b.y, b.w, b.h);
-            const res = await fetch(APINEX_URL, {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model: 'free/gpt-6-luna', temperature: 0, max_tokens: 20, messages: [{ role: 'user', content: [
-                { type: 'text', text: tilePrompt },
-                { type: 'image_url', image_url: { url: 'data:image/png;base64,' + crop.toString('base64') } } ] }] }),
-              signal: AbortSignal.timeout(30000),
-            });
-            const t = await res.text();
-            let j; try { j = JSON.parse(t); } catch { return { i, match: false }; }
-            const p = parseJsonLoose((j?.choices?.[0]?.message?.content || '').trim());
-            return { i, match: !!(p && p.match) };
+            const votes = await Promise.all(JUDGES.map(async (jm) => {
+              try {
+                const res = await fetch(APINEX_URL, {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ model: jm, temperature: 0, max_tokens: 20, messages: [{ role: 'user', content: [
+                    { type: 'text', text: tilePrompt },
+                    { type: 'image_url', image_url: { url: 'data:image/png;base64,' + crop.toString('base64') } } ] }] }),
+                  signal: AbortSignal.timeout(30000),
+                });
+                const t = await res.text();
+                let j; try { j = JSON.parse(t); } catch { return false; }
+                const p = parseJsonLoose((j?.choices?.[0]?.message?.content || '').trim());
+                return !!(p && p.match);
+              } catch { return false; }
+            }));
+            return { i, match: votes.some(Boolean) };
           } catch { return { i, match: false }; }
         }));
         const matches = answers.filter((a) => a.match);
