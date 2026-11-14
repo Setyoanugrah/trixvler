@@ -359,95 +359,66 @@ export async function solveRecaptcha(opts = {}) {
           else if (tiles === 4) { cols = 2; rows = 2; }
         } catch {}
 
-        // FAST PER-TILE JUDGE with DOM-precise tile boxes: crop each tile by its own
-        // bounding box (no divide-area guessing), judge all in parallel (~3s/call).
+        // FULL-GRID JUDGE: one call, tiles array back (model needs context to identify
+        // partial objects in small tiles). Click centers computed from DOM tile boxes.
         const c = cols || 3, r = rows || 3;
-        const instructionShort = (instruction || '').replace(/\s+/g, ' ').replace(/Click verify.*$/i, '').trim();
-        const tilePrompt = `Is there ${instructionShort || 'the requested object'} in this photo? Reply ONLY JSON {"match":true} or {"match":false}. Partial views count.`;
-        // DOM tile boxes -> page coords -> crop coords
-        let tileBoxes = [];
-        try {
-          const tilesLoc = challenge.locator('.rc-image-tile-wrapper');
-          const n = await tilesLoc.count();
-          for (let i = 0; i < n; i++) {
-            // frame locator boundingBox() is ALREADY in page coordinates - no offset math
-            const b = await tilesLoc.nth(i).boundingBox().catch(() => null);
-            if (b) tileBoxes.push({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) });
-          }
-        } catch {}
-        if (!tileBoxes.length) {
-          // fallback: divide crop evenly
-          const cellW = shotW / c, cellH = shotH / r;
-          for (let iy = 0; iy < r; iy++) for (let ix = 0; ix < c; ix++)
-            tileBoxes.push({ x: Math.round(ix * cellW), y: Math.round(iy * cellH), w: Math.round(cellW), h: Math.round(cellH) });
-        }
-        const JUDGES = ['free/gpt-6-luna', 'free/gemini-3.8-flash', 'free/qwen-3.8-max'];
-        // shot is cropped from the page at origin (gx,gy) - convert page-coord boxes
-        let cropOrigin = { x: 0, y: 0 };
-        try {
-          const bb = await imgLoc.boundingBox();
-          if (bb) cropOrigin = { x: Math.round(bb.x), y: Math.round(bb.y) };
-        } catch {}
-        const answers = await Promise.all(tileBoxes.map(async (b, i) => {
+        const instructionShort = (instruction || '').replace(/\s+/g, ' ').replace(/Click verify.*$/i, '').replace(/If there are none.*$/i, '').trim();
+        const gridPrompt = [
+          `The challenge asks: "${instructionShort}".`,
+          `The image is a ${c}x${r} grid of ${c * r} photo tiles, indexed 0-${c * r - 1} row-major (0 = top-left).`,
+          'Tiles may look distorted (posterized/noisy) on purpose - judge the content anyway.',
+          'A tile matches if ANY significant part of the requested object is in it (wheels, bumpers, fragments count).',
+          'Ignore tiles already marked with a blue checkmark badge.',
+          `Reply ONLY JSON: {"tiles":[${c * r} booleans, row-major]}`,
+        ].join('\n');
+        let picked = [];
+        let mUsed = '';
+        for (let attempt = 0; attempt < Math.min(3, models.length); attempt++) {
+          const mm = models[(round - 1 + attempt) % models.length];
           try {
-            const P = 12;
-            const crop = await sharpCrop(shot,
-              Math.max(0, b.x - cropOrigin.x - P), Math.max(0, b.y - cropOrigin.y - P),
-              b.w + 2 * P, b.h + 2 * P);
-            const votes = await Promise.all(JUDGES.map(async (jm) => {
-              try {
-                const res = await fetch(APINEX_URL, {
-                  method: 'POST',
-                  headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ model: jm, temperature: 0, max_tokens: 20, messages: [{ role: 'user', content: [
-                    { type: 'text', text: tilePrompt },
-                    { type: 'image_url', image_url: { url: 'data:image/png;base64,' + crop.toString('base64') } } ] }] }),
-                  signal: AbortSignal.timeout(30000),
-                });
-                const t = await res.text();
-                let j; try { j = JSON.parse(t); } catch { return false; }
-                const p = parseJsonLoose((j?.choices?.[0]?.message?.content || '').trim());
-                return !!(p && p.match);
-              } catch { return false; }
-            }));
-            return { i, match: votes.some(Boolean) };
-          } catch { return { i, match: false }; }
-        }));
-        const matches = answers.filter((a) => a.match);
-        const picked = matches.map((a) => ({ idx: a.i, box: tileBoxes[a.i] }));
-        // click tile centers directly in page coords (no normalized-offset guessing)
-        // safety net: all-tiles-false is suspicious - cross-check with a full-grid call
-        if (!picked.length) {
-          try {
-            const gridPrompt = `This image is a ${c}x${r} photo grid. Task: ${instructionShort}. Which tiles (row-major indexing 0-${c * r - 1}) contain the object? Reply ONLY JSON {"tiles":[${Array(c * r).fill('true|false').join(',')}]}.`;
             const res = await fetch(APINEX_URL, {
               method: 'POST',
               headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model, temperature: 0, max_tokens: 300, messages: [{ role: 'user', content: [
+              body: JSON.stringify({ model: mm, temperature: 0, max_tokens: 300, messages: [{ role: 'user', content: [
                 { type: 'text', text: gridPrompt },
                 { type: 'image_url', image_url: { url: 'data:image/png;base64,' + shot.toString('base64') } } ] }] }),
               signal: AbortSignal.timeout(60000),
             });
             const t = await res.text();
-            let j; try { j = JSON.parse(t); } catch {}
+            let j; try { j = JSON.parse(t); } catch { continue; }
             const p = parseJsonLoose((j?.choices?.[0]?.message?.content || '').trim());
-            if (p && Array.isArray(p.tiles)) {
+            if (p && Array.isArray(p.tiles) && p.tiles.length === c * r) {
+              mUsed = mm;
               p.tiles.forEach((v, i) => {
-                if (v === true) {
-                  const ix = i % c, iy = Math.floor(i / c);
-                  picked.push({ idx: i, box: { x: Math.round(ix * shotW / c), y: Math.round(iy * shotH / r), w: Math.round(shotW / c), h: Math.round(shotH / r) } });
-                }
+                if (v === true) picked.push({ idx: i });
               });
-              log.push(`r${round}:gridfallback=${picked.length}`);
+              try {
+                fs.mkdirSync('/tmp/rcdebug', { recursive: true });
+                fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, raw: (j?.choices?.[0]?.message?.content || '').slice(0, 300), tiles: p.tiles }));
+                fs.writeFileSync(`/tmp/rcdebug/r${round}-crop.png`, shot);
+              } catch {}
+              break;
             }
           } catch {}
         }
-        // normalized clicks relative to the challenge image area (imgLoc) - clickAt handles them
-        const clicks = picked.map((p) => ({
-          relX: Math.min(990, Math.max(10, ((p.box.x - cropOrigin.x) + p.box.w / 2) / shotW * 1000)),
-          relY: Math.min(990, Math.max(10, ((p.box.y - cropOrigin.y) + p.box.h / 2) / shotH * 1000)),
-        }));
-        log.push(`r${round}:model=luna:matched=${matches.length}/${tileBoxes.length}`);
+        // DOM tile boxes -> click exact centers (page coords)
+        let tileBoxes = [];
+        try {
+          const tilesLoc = challenge.locator('.rc-image-tile-wrapper');
+          const n = await tilesLoc.count();
+          for (let i = 0; i < n; i++) {
+            const b = await tilesLoc.nth(i).boundingBox().catch(() => null);
+            if (b) tileBoxes.push(b);
+          }
+        } catch {}
+        const clicks = picked.map((p) => {
+          const b = tileBoxes[p.idx];
+          if (b) return { pageX: Math.round(b.x + b.width / 2), pageY: Math.round(b.y + b.height / 2) };
+          const ix = p.idx % c, iy = Math.floor(p.idx / c);
+          return { pageX: null, pageY: null, relX: ((ix + 0.5) / c) * 1000, relY: ((iy + 0.5) / r) * 1000 };
+        });
+        log.push(`r${round}:model=${mUsed || 'none'}:matched=${picked.length}/${c * r}`);
+
         // the challenge can expire DURING the vision calls - verify state before acting
         if (await isExpired(challenge)) {
           log.push(`r${round}:expired-mid`);
@@ -462,24 +433,20 @@ export async function solveRecaptcha(opts = {}) {
           challengeStart = Date.now();
           continue;
         }
-        try {
-          fs.mkdirSync('/tmp/rcdebug', { recursive: true });
-          fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) }));
-          fs.writeFileSync(`/tmp/rcdebug/r${round}-crop.png`, shot);
-          for (let i = 0; i < tileBoxes.length && i < 9; i++) {
-            const tc = await sharpCrop(shot, tileBoxes[i].x - cropOrigin.x, tileBoxes[i].y - cropOrigin.y, tileBoxes[i].w, tileBoxes[i].h);
-            fs.writeFileSync(`/tmp/rcdebug/r${round}-tile${i}.png`, tc);
-          }
-        } catch {}
-
-        log.push(`r${round}:model=luna:matched=${matches.length}/${c * r}`);
-        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
-
-
-        // human-ish pacing; normalized clicks relative to the challenge image area
+        // human-ish pacing; clicks at exact tile centers (page coords)
         for (let ci = 0; ci < clicks.length; ci++) {
           if (ci === 0) await sleep(800);
-          await clickAt(challenge, imgLoc, clicks[ci].relX, clicks[ci].relY);
+          const cc = clicks[ci];
+          if (cc.pageX != null) {
+            const pg = challenge.page();
+            await pg.mouse.move(cc.pageX, cc.pageY, { steps: 4 });
+            await pg.mouse.down();
+            await sleep(rnd(30, 70));
+            await pg.mouse.up();
+            await sleep(150);
+          } else {
+            await clickAt(challenge, imgLoc, cc.relX, cc.relY);
+          }
           if (ci < clicks.length - 1) await sleep(1000);
         }
         // dynamic grids replace the clicked tile with a fresh image after ~5-7s
