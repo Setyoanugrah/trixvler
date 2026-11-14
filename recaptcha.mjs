@@ -207,7 +207,6 @@ export async function solveRecaptcha(opts = {}) {
   const FREE_VISION = [
     'free/gpt-6-luna',
     'free/gemini-3.8-flash',
-    'free/mimo-v2.6-pro',
     'free/qwen-3.8-max',
     'free/kimi-k3',
   ];
@@ -388,7 +387,7 @@ export async function solveRecaptcha(opts = {}) {
             const res = await fetch(APINEX_URL, {
               method: 'POST',
               headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model, temperature: 0, max_tokens: 20, messages: [{ role: 'user', content: [
+              body: JSON.stringify({ model: 'free/gpt-6-luna', temperature: 0, max_tokens: 20, messages: [{ role: 'user', content: [
                 { type: 'text', text: tilePrompt },
                 { type: 'image_url', image_url: { url: 'data:image/png;base64,' + crop.toString('base64') } } ] }] }),
               signal: AbortSignal.timeout(30000),
@@ -405,7 +404,7 @@ export async function solveRecaptcha(opts = {}) {
           return { idx: a.i, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
         });
         const clicks = picked;
-        log.push(`r${round}:model=${model}:matched=${matches.length}/${tileBoxes.length}`);
+        log.push(`r${round}:model=luna:matched=${matches.length}/${tileBoxes.length}`);
         try {
           fs.mkdirSync('/tmp/rcdebug', { recursive: true });
           fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) }));
@@ -416,7 +415,7 @@ export async function solveRecaptcha(opts = {}) {
           }
         } catch {}
 
-        log.push(`r${round}:model=${model}:matched=${matches.length}/${c * r}`);
+        log.push(`r${round}:model=luna:matched=${matches.length}/${c * r}`);
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
 
 
