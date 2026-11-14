@@ -270,6 +270,10 @@ export async function aiFallback(b64, opts = {}) {
       ],
     }],
   };
+
+  let lastFail = null;
+  let p = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
   try {
     const res = await fetch('https://api.apinex.bond/v1/chat/completions', {
       method: 'POST',
@@ -277,20 +281,21 @@ export async function aiFallback(b64, opts = {}) {
       body: JSON.stringify(body),
 });
     const j = await res.json();
-    const txt = j?.choices?.[0]?.message?.content || '';
+    let txt = j?.choices?.[0]?.message?.content || '';
+    txt = String(txt).replace(/```(?:json)?/gi, '').trim();
     const m = txt.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    const p = JSON.parse(m[0]);
+    if (!m) { lastFail = 'no-json'; continue; }
+    try { p = JSON.parse(m[0]); } catch { lastFail = 'json-parse'; continue; }
 
     // ---- deterministic validation gate (counts is the source of truth) ----
     // n comes from the MODEL's own count (CV inferN is unreliable on odd aspect ratios)
     const mN = Number(p.n);
     const counts = Array.isArray(p.counts) ? p.counts.map((x) => Number(x)) : null;
-    if (!counts || !Number.isInteger(mN) || mN < 3 || mN > 20) return { fail: 'n_invalid', source: 'ai' };
-    if (counts.length !== mN) return { fail: 'counts_shape', source: 'ai' };
-    if (counts.some((x) => !Number.isFinite(x) || x < 1)) return { fail: 'counts_range', source: 'ai' };
+    if (!counts || !Number.isInteger(mN) || mN < 3 || mN > 20) { lastFail = 'n_invalid'; continue; }
+    if (counts.length !== mN) { lastFail = 'counts_shape'; continue; }
+    if (counts.some((x) => !Number.isFinite(x) || x < 1)) { lastFail = 'counts_range'; continue; }
     const sumCounts = counts.reduce((a, b) => a + b, 0);
-    if (sumCounts !== mN) return { fail: 'counts_sum_mismatch', source: 'ai' };
+    if (sumCounts !== mN) { lastFail = 'counts_sum_mismatch'; continue; }
 
     const minCount = Math.min(...counts);
     const expected = counts.map((c, i) => (c === minCount ? i : -1)).filter((i) => i >= 0);
@@ -305,13 +310,14 @@ export async function aiFallback(b64, opts = {}) {
     const conf = Number(p.confidence) || 0;
     const meta = { modelN: mN, groups, counts, confidence: conf, agree: same };
     if (expected.length > 1) {
-      // tie: model itself cannot break it deterministically - let solver decide
       return { index: null, tie: true, candidates: expected, ...meta, source: 'ai' };
     }
     return { index: expected[0], ...meta, source: 'ai' };
-  } catch {
-    return null;
+  } catch (e) {
+    lastFail = 'exception:' + (e.message || '');
   }
+  } // retry
+  return lastFail ? { fail: lastFail, source: 'ai' } : null;
 }
 
 export async function solve(buffer, opts = {}) {
