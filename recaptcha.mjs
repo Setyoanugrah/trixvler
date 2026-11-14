@@ -411,7 +411,15 @@ export async function solveRecaptcha(opts = {}) {
         });
         const clicks = picked;
         log.push(`r${round}:model=${model}:matched=${matches.length}/${tileBoxes.length}`);
-        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) })); } catch {}
+        try {
+          fs.mkdirSync('/tmp/rcdebug', { recursive: true });
+          fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) }));
+          fs.writeFileSync(`/tmp/rcdebug/r${round}-crop.png`, shot);
+          for (let i = 0; i < tileBoxes.length && i < 9; i++) {
+            const tc = await sharpCrop(shot, tileBoxes[i].x, tileBoxes[i].y, tileBoxes[i].w, tileBoxes[i].h);
+            fs.writeFileSync(`/tmp/rcdebug/r${round}-tile${i}.png`, tc);
+          }
+        } catch {}
 
         log.push(`r${round}:model=${model}:matched=${matches.length}/${c * r}`);
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
