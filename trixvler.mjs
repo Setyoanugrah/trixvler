@@ -239,22 +239,23 @@ export async function aiFallback(b64, opts = {}) {
   const key = opts.apiKey || process.env.APINEX_KEY;
   if (!key) return null;
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
-  const n = opts.n || 8;
+  const nHint = opts.n; // CV guess, may be wrong - model recount wins
   const sys = [
-    'You are a visual comparison assistant. Given an image containing N icons in a horizontal row (index 0 = leftmost), find the icon(s) whose TYPE is the RAREST - the type that appears fewer times than every other type.',
+    'You are a visual comparison assistant. Given an image containing icons in a horizontal row (index 0 = leftmost), find the icon(s) whose TYPE is the RAREST - the type that appears fewer times than every other type.',
     '',
-    'Return ONLY valid JSON: {"odd_indices":[int],"confidence":float,"counts":[int]}',
-    '- counts: array of N integers; counts[i] = how many times the type of icon i appears in the row.',
+    'Return ONLY valid JSON: {"n":int,"odd_indices":[int],"confidence":float,"counts":[int]}',
+    '- n: how many icons you actually see in the row. Count carefully.',
+    '- counts: array of n integers; counts[i] = how many times the type of icon i appears in the row.',
     '- Icons shown rotated (0/90/180/270 degrees) or mirrored count as the SAME type.',
     '- If all icons have the same type, odd_indices=[] and confidence=0.',
-    '- Never return more than half of N as odd.',
-    '- counts must sum to N. Do not round or equalize counts.',
+    '- Never return more than half of n as odd.',
+    '- counts must sum to n. Do not round or equalize counts.',
     '- Each counts[i] >= 1.',
     '- Always return your best guess.',
   ].join('\n');
   const user = [
-    `Image contains ${n} icons in a single horizontal row.`,
-    `Verify: sum(counts) == ${n} before responding.`,
+    nHint ? `CV heuristic guesses ${nHint} icons - verify by counting yourself; your count wins if different.` : 'Image contains a row of icons.',
+    'Verify: sum(counts) == n before responding.',
     'Return JSON.',
   ].join('\n');
   const body = {
@@ -282,15 +283,18 @@ export async function aiFallback(b64, opts = {}) {
     const p = JSON.parse(m[0]);
 
     // ---- deterministic validation gate (counts is the source of truth) ----
+    // n comes from the MODEL's own count (CV inferN is unreliable on odd aspect ratios)
+    const mN = Number(p.n);
     const counts = Array.isArray(p.counts) ? p.counts.map((x) => Number(x)) : null;
-    if (!counts || counts.length !== n) return { fail: 'counts_shape', source: 'ai' };
+    if (!counts || !Number.isInteger(mN) || mN < 3 || mN > 20) return { fail: 'n_invalid', source: 'ai' };
+    if (counts.length !== mN) return { fail: 'counts_shape', source: 'ai' };
     if (counts.some((x) => !Number.isFinite(x) || x < 1)) return { fail: 'counts_range', source: 'ai' };
     const sumCounts = counts.reduce((a, b) => a + b, 0);
-    if (sumCounts !== n) return { fail: 'counts_sum_mismatch', source: 'ai' };
+    if (sumCounts !== mN) return { fail: 'counts_sum_mismatch', source: 'ai' };
 
     const minCount = Math.min(...counts);
     const expected = counts.map((c, i) => (c === minCount ? i : -1)).filter((i) => i >= 0);
-    const modelOdd = [...new Set((Array.isArray(p.odd_indices) ? p.odd_indices : []).map((x) => Number(x)).filter((x) => Number.isInteger(x) && x >= 0 && x < n))].sort((a, b) => a - b);
+    const modelOdd = [...new Set((Array.isArray(p.odd_indices) ? p.odd_indices : []).map((x) => Number(x)).filter((x) => Number.isInteger(x) && x >= 0 && x < mN))].sort((a, b) => a - b);
     const expectedSorted = [...expected].sort((a, b) => a - b);
     const same = modelOdd.length === expectedSorted.length && modelOdd.every((v, i) => v === expectedSorted[i]);
 
@@ -299,15 +303,12 @@ export async function aiFallback(b64, opts = {}) {
     const groups = Object.keys(groupMap).map(Number).sort((a, b) => a - b).map((k) => groupMap[k]);
 
     const conf = Number(p.confidence) || 0;
+    const meta = { modelN: mN, groups, counts, confidence: conf, agree: same };
     if (expected.length > 1) {
       // tie: model itself cannot break it deterministically - let solver decide
-      return { index: null, tie: true, groups, counts, confidence: conf, candidates: expected, agree: same, source: 'ai' };
+      return { index: null, tie: true, candidates: expected, ...meta, source: 'ai' };
     }
-    if (!same) {
-      // counts win over odd_indices (deterministic)
-      return { index: expected[0], groups, counts, confidence: conf, agree: false, source: 'ai' };
-    }
-    return { index: expected[0], groups, counts, confidence: conf, agree: true, source: 'ai' };
+    return { index: expected[0], ...meta, source: 'ai' };
   } catch {
     return null;
   }
@@ -327,7 +328,13 @@ export async function solve(buffer, opts = {}) {
   if (!needAI) return { ...local, source: 'local' };
   const b64 = PNG.sync.write({ width: img.width, height: img.height, data: Buffer.from(img.data) }).toString('base64');
   const ai = await aiFallback(b64, { ...opts, n: local.n });
-  if (ai && !ai.fail) return { ...local, ...ai, localIndex: local.index, source: 'ai' };
+  if (ai && !ai.fail) {
+    // model saw a different tile count than the CV heuristic - trust the model's count
+    if (ai.modelN && ai.modelN !== local.n) {
+      return { ...local, n: ai.modelN, ...ai, localIndex: local.index, nSource: 'model' };
+    }
+    return { ...local, ...ai, localIndex: local.index, source: 'ai' };
+  }
   if (ai && ai.fail) return { ...local, source: 'local', aiFailed: true, aiFailReason: ai.fail };
   return { ...local, source: 'local', aiFailed: true };
 }
