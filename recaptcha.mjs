@@ -405,11 +405,9 @@ export async function solveRecaptcha(opts = {}) {
           } catch { return { i, match: false }; }
         }));
         const matches = answers.filter((a) => a.match);
-        const picked = matches.map((a) => {
-          const ix = a.i % c, iy = Math.floor(a.i / c);
-          return { idx: a.i, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
-        });
-        const clicks = picked;
+        const picked = matches.map((a) => ({ idx: a.i, box: tileBoxes[a.i] }));
+        // click tile centers directly in page coords (no normalized-offset guessing)
+        const clicks = picked.map((p) => ({ x: p.box.x + p.box.w / 2, y: p.box.y + p.box.h / 2, pageCoords: true }));
         log.push(`r${round}:model=luna:matched=${matches.length}/${tileBoxes.length}`);
         // the challenge can expire DURING the vision calls - verify state before acting
         if (await isExpired(challenge)) {
@@ -439,10 +437,19 @@ export async function solveRecaptcha(opts = {}) {
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
 
 
-        // human-ish pacing: 1-3s between clicks, 1-2s before the first
+        // human-ish pacing; page-coord clicks land exactly on the tile center
         for (let ci = 0; ci < clicks.length; ci++) {
           if (ci === 0) await sleep(800);
-          await clickAt(challenge, imgLoc, clicks[ci].x, clicks[ci].y);
+          const cc = clicks[ci];
+          if (cc.pageCoords) {
+            await challenge.page().mouse.move(cc.x, cc.y, { steps: 4 });
+            await challenge.page().mouse.down();
+            await sleep(rnd(30, 70));
+            await challenge.page().mouse.up();
+            await sleep(150);
+          } else {
+            await clickAt(challenge, imgLoc, cc.x, cc.y);
+          }
           if (ci < clicks.length - 1) await sleep(1000);
         }
         // dynamic grids replace the clicked tile with a fresh image after ~5-7s
