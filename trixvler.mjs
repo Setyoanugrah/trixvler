@@ -240,27 +240,31 @@ export async function aiFallback(b64, opts = {}) {
   if (!key) return null;
   const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
   const n = opts.n || 8;
-  const text = [
-    `The image is a horizontal strip of ${n} icons. Tile 0 is the leftmost, tile ${n - 1} is the rightmost.`,
-    'Some tiles show the SAME base icon rotated by 0/90/180/270 degrees and/or mirrored; treat those as ONE type.',
+  const sys = [
+    'You are a visual comparison assistant. Given an image containing N icons in a horizontal row (index 0 = leftmost), find the icon(s) whose TYPE is the RAREST - the type that appears fewer times than every other type.',
     '',
-    'Do this, in order:',
-    '1) Describe each tile base icon in 1-3 words (ignore rotation and mirroring).',
-    '2) Group tiles that share the same base icon.',
-    '3) Count the tiles in every group.',
-    '4) Identify the group(s) with the smallest count.',
-    '',
-    'Return ONLY JSON, no prose:',
-    '{"tiles":["desc0","desc1"],"groups":[[0,3]],"counts":[2],"least":[indices in the smallest group]}',
+    'Return ONLY valid JSON: {"odd_indices":[int],"confidence":float,"counts":[int]}',
+    '- counts: array of N integers; counts[i] = how many times the type of icon i appears in the row.',
+    '- Icons shown rotated (0/90/180/270 degrees) or mirrored count as the SAME type.',
+    '- If all icons have the same type, odd_indices=[] and confidence=0.',
+    '- Never return more than half of N as odd.',
+    '- counts must sum to N. Do not round or equalize counts.',
+    '- Each counts[i] >= 1.',
+    '- Always return your best guess.',
+  ].join('\n');
+  const user = [
+    `Image contains ${n} icons in a single horizontal row.`,
+    `Verify: sum(counts) == ${n} before responding.`,
+    'Return JSON.',
   ].join('\n');
   const body = {
     model,
     temperature: 0,
-    max_tokens: 700,
+    max_tokens: 500,
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text },
+        { type: 'text', text: sys + '\n\n' + user },
         { type: 'image_url', image_url: { url: 'data:image/png;base64,' + b64 } },
       ],
     }],
@@ -270,22 +274,40 @@ export async function aiFallback(b64, opts = {}) {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
+});
     const j = await res.json();
     const txt = j?.choices?.[0]?.message?.content || '';
     const m = txt.match(/\{[\s\S]*\}/);
     if (!m) return null;
     const p = JSON.parse(m[0]);
-    const g = Array.isArray(p.groups) ? p.groups : [];
-    let least = Array.isArray(p.least) ? p.least.filter((x) => typeof x === 'number') : [];
-    if (!least.length && g.length) {
-      let best = g[0];
-      for (const x of g) if (Array.isArray(x) && x.length < best.length) best = x;
-      least = best;
+
+    // ---- deterministic validation gate (counts is the source of truth) ----
+    const counts = Array.isArray(p.counts) ? p.counts.map((x) => Number(x)) : null;
+    if (!counts || counts.length !== n) return { fail: 'counts_shape', source: 'ai' };
+    if (counts.some((x) => !Number.isFinite(x) || x < 1)) return { fail: 'counts_range', source: 'ai' };
+    const sumCounts = counts.reduce((a, b) => a + b, 0);
+    if (sumCounts !== n) return { fail: 'counts_sum_mismatch', source: 'ai' };
+
+    const minCount = Math.min(...counts);
+    const expected = counts.map((c, i) => (c === minCount ? i : -1)).filter((i) => i >= 0);
+    const modelOdd = [...new Set((Array.isArray(p.odd_indices) ? p.odd_indices : []).map((x) => Number(x)).filter((x) => Number.isInteger(x) && x >= 0 && x < n))].sort((a, b) => a - b);
+    const expectedSorted = [...expected].sort((a, b) => a - b);
+    const same = modelOdd.length === expectedSorted.length && modelOdd.every((v, i) => v === expectedSorted[i]);
+
+    // group mapping: count value -> [indices]
+    const groupMap = counts.reduce((acc, c2, i) => { (acc[c2] ??= []).push(i); return acc; }, {});
+    const groups = Object.keys(groupMap).map(Number).sort((a, b) => a - b).map((k) => groupMap[k]);
+
+    const conf = Number(p.confidence) || 0;
+    if (expected.length > 1) {
+      // tie: model itself cannot break it deterministically - let solver decide
+      return { index: null, tie: true, groups, counts, confidence: conf, candidates: expected, agree: same, source: 'ai' };
     }
-    const idx = least[0];
-    if (typeof idx !== 'number') return null;
-    return { index: idx, groups: g, tiles: p.tiles, source: 'ai' };
+    if (!same) {
+      // counts win over odd_indices (deterministic)
+      return { index: expected[0], groups, counts, confidence: conf, agree: false, source: 'ai' };
+    }
+    return { index: expected[0], groups, counts, confidence: conf, agree: true, source: 'ai' };
   } catch {
     return null;
   }
@@ -305,7 +327,8 @@ export async function solve(buffer, opts = {}) {
   if (!needAI) return { ...local, source: 'local' };
   const b64 = PNG.sync.write({ width: img.width, height: img.height, data: Buffer.from(img.data) }).toString('base64');
   const ai = await aiFallback(b64, { ...opts, n: local.n });
-  if (ai) return { ...local, ...ai, localIndex: local.index, source: 'ai' };
+  if (ai && !ai.fail) return { ...local, ...ai, localIndex: local.index, source: 'ai' };
+  if (ai && ai.fail) return { ...local, source: 'local', aiFailed: true, aiFailReason: ai.fail };
   return { ...local, source: 'local', aiFailed: true };
 }
 
