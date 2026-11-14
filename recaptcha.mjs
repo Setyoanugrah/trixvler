@@ -106,7 +106,7 @@ async function clickAt(challenge, loc, nx, ny) {
 }
 
 
-async function waitAllDeselected(challenge, maxMs = 8000) {
+async function waitAllDeselected(challenge, maxMs = 4000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
     try {
@@ -131,7 +131,7 @@ async function shotIsBlank(buf) {
   } catch { return false; }
 }
 
-async function waitTileRender(challenge, imgLoc, maxMs = 8000) {
+async function waitTileRender(challenge, imgLoc, maxMs = 6000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
     await sleep(800);
@@ -161,13 +161,13 @@ async function isExpired(challenge) {
 }
 
 
-async function waitTileReplaced(challenge, maxMs = 9000) {
+async function waitTileReplaced(challenge, maxMs = 6000) {
   try {
     const before = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
       (els) => els.map((e) => e.getAttribute('src') || ''));
     const t0 = Date.now();
     while (Date.now() - t0 < maxMs) {
-      await sleep(900);
+      await sleep(500);
       const after = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
         (els) => els.map((e) => e.getAttribute('src') || ''));
       if (after.length && after.some((v, i) => v !== before[i])) return true; // at least one tile replaced
@@ -381,7 +381,7 @@ export async function solveRecaptcha(opts = {}) {
           for (let iy = 0; iy < r; iy++) for (let ix = 0; ix < c; ix++)
             tileBoxes.push({ x: Math.round(ix * cellW), y: Math.round(iy * cellH), w: Math.round(cellW), h: Math.round(cellH) });
         }
-        const JUDGES = ['free/gpt-6-luna', 'free/gemini-3.8-flash'];
+        const JUDGES = ['free/gpt-6-luna', 'free/gemini-3.8-flash', 'free/qwen-3.8-max'];
         const answers = await Promise.all(tileBoxes.map(async (b, i) => {
           try {
             const crop = await sharpCrop(shot, b.x, b.y, b.w, b.h);
@@ -441,9 +441,9 @@ export async function solveRecaptcha(opts = {}) {
 
         // human-ish pacing: 1-3s between clicks, 1-2s before the first
         for (let ci = 0; ci < clicks.length; ci++) {
-          if (ci === 0) await sleep(rnd(1000, 2000));
+          if (ci === 0) await sleep(800);
           await clickAt(challenge, imgLoc, clicks[ci].x, clicks[ci].y);
-          if (ci < clicks.length - 1) await sleep(rnd(1000, 3000));
+          if (ci < clicks.length - 1) await sleep(1000);
         }
         // dynamic grids replace the clicked tile with a fresh image after ~5-7s
         await waitTileReplaced(challenge);
