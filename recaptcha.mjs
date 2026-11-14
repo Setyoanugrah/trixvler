@@ -367,7 +367,8 @@ export async function solveRecaptcha(opts = {}) {
           `The challenge asks: "${instructionShort}".`,
           `The image is a ${c}x${r} grid of ${c * r} photo tiles, indexed 0-${c * r - 1} row-major (0 = top-left).`,
           'Tiles may look distorted (posterized/noisy) on purpose - judge the content anyway.',
-          'A tile matches if ANY significant part of the requested object is in it (wheels, bumpers, fragments count).',
+          'A tile matches if ANY part of the requested object is visible in it - including PARTIAL objects at tile edges (a few stripes of a crosswalk, a wheel of a car, a corner of a sign).',
+          'CRITICAL: Google deliberately puts partial/edge-fragment views of the object in edge tiles - look closely at every tile boundary for fragments of the pattern/texture associated with the object.',
           'Ignore tiles already marked with a blue checkmark badge.',
           `Reply ONLY JSON: {"tiles":[${c * r} booleans, row-major]}`,
         ].join('\n');
