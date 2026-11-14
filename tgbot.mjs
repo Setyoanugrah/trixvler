@@ -120,5 +120,8 @@ async function loop() {
   }
 }
 
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e?.message || e));
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e?.message || e));
+
 console.log('tg iconcaptcha AI bot polling...');
 loop();
