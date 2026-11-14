@@ -419,7 +419,12 @@ export async function solveRecaptcha(opts = {}) {
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
 
 
-        for (const c of clicks) await clickAt(challenge, imgLoc, c.x, c.y);
+        // human-ish pacing: 1-3s between clicks, 1-2s before the first
+        for (let ci = 0; ci < clicks.length; ci++) {
+          if (ci === 0) await sleep(rnd(1000, 2000));
+          await clickAt(challenge, imgLoc, clicks[ci].x, clicks[ci].y);
+          if (ci < clicks.length - 1) await sleep(rnd(1000, 3000));
+        }
         // dynamic grids replace the clicked tile with a fresh image after ~5-7s
         await waitTileReplaced(challenge);
         await sleep(rnd(700, 1500));
