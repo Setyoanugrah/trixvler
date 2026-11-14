@@ -97,10 +97,8 @@ async function clickAt(challenge, loc, nx, ny) {
   if (!box) return;
   const px = Math.max(2, Math.min(box.width - 2, Math.round((nx / 1000) * box.width)));
   const py = Math.max(2, Math.min(box.height - 2, Math.round((ny / 1000) * box.height)));
-  // raw mouse events at page level: no actionability/stability wait (tiles animate)
-  const frameEl = await challenge.frameElement();
-  const fb = await frameEl.boundingBox();
-  await challenge.page().mouse.move(fb.x + box.x + px, fb.y + box.y + py, { steps: 5 });
+  // loc.boundingBox() is already page-coordinates; raw mouse events, no stability wait
+  await challenge.page().mouse.move(box.x + px, box.y + py, { steps: 5 });
   await challenge.page().mouse.down();
   await sleep(rnd(30, 80));
   await challenge.page().mouse.up();
@@ -339,11 +337,9 @@ export async function solveRecaptcha(opts = {}) {
         let shot = pageBuf;
         let shotW = pageW, shotH = pageH;
         try {
-          const frameEl = await challenge.frameElement();
-          const fb = await frameEl.boundingBox();
           const bb = await imgLoc.boundingBox();
-          if (fb && bb) {
-            const gx = Math.max(0, Math.round(fb.x + bb.x)), gy = Math.max(0, Math.round(fb.y + bb.y));
+          if (bb) {
+            const gx = Math.max(0, Math.round(bb.x)), gy = Math.max(0, Math.round(bb.y));
             const gw = Math.min(pageW - gx, Math.round(bb.width)), gh = Math.min(pageH - gy, Math.round(bb.height));
             shot = await sharpCrop(pageBuf, gx, gy, gw, gh);
             shotW = gw; shotH = gh;
@@ -372,13 +368,12 @@ export async function solveRecaptcha(opts = {}) {
         // DOM tile boxes -> page coords -> crop coords
         let tileBoxes = [];
         try {
-          const frameEl = await challenge.frameElement();
-          const fb = await frameEl.boundingBox();
           const tilesLoc = challenge.locator('.rc-image-tile-wrapper');
           const n = await tilesLoc.count();
           for (let i = 0; i < n; i++) {
+            // frame locator boundingBox() is ALREADY in page coordinates - no offset math
             const b = await tilesLoc.nth(i).boundingBox().catch(() => null);
-            if (b) tileBoxes.push({ x: Math.round(fb.x + b.x), y: Math.round(fb.y + b.y), w: Math.round(b.width), h: Math.round(b.height) });
+            if (b) tileBoxes.push({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) });
           }
         } catch {}
         if (!tileBoxes.length) {
