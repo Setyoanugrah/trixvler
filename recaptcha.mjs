@@ -382,9 +382,15 @@ export async function solveRecaptcha(opts = {}) {
             tileBoxes.push({ x: Math.round(ix * cellW), y: Math.round(iy * cellH), w: Math.round(cellW), h: Math.round(cellH) });
         }
         const JUDGES = ['free/gpt-6-luna', 'free/gemini-3.8-flash', 'free/qwen-3.8-max'];
+        // shot is cropped from the page at origin (gx,gy) - convert page-coord boxes
+        let cropOrigin = { x: 0, y: 0 };
+        try {
+          const bb = await imgLoc.boundingBox();
+          if (bb) cropOrigin = { x: Math.round(bb.x), y: Math.round(bb.y) };
+        } catch {}
         const answers = await Promise.all(tileBoxes.map(async (b, i) => {
           try {
-            const crop = await sharpCrop(shot, b.x, b.y, b.w, b.h);
+            const crop = await sharpCrop(shot, b.x - cropOrigin.x, b.y - cropOrigin.y, b.w, b.h);
             const votes = await Promise.all(JUDGES.map(async (jm) => {
               try {
                 const res = await fetch(APINEX_URL, {
@@ -428,7 +434,7 @@ export async function solveRecaptcha(opts = {}) {
           fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) }));
           fs.writeFileSync(`/tmp/rcdebug/r${round}-crop.png`, shot);
           for (let i = 0; i < tileBoxes.length && i < 9; i++) {
-            const tc = await sharpCrop(shot, tileBoxes[i].x, tileBoxes[i].y, tileBoxes[i].w, tileBoxes[i].h);
+            const tc = await sharpCrop(shot, tileBoxes[i].x - cropOrigin.x, tileBoxes[i].y - cropOrigin.y, tileBoxes[i].w, tileBoxes[i].h);
             fs.writeFileSync(`/tmp/rcdebug/r${round}-tile${i}.png`, tc);
           }
         } catch {}
