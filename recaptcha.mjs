@@ -411,6 +411,20 @@ export async function solveRecaptcha(opts = {}) {
         });
         const clicks = picked;
         log.push(`r${round}:model=luna:matched=${matches.length}/${tileBoxes.length}`);
+        // the challenge can expire DURING the vision calls - verify state before acting
+        if (await isExpired(challenge)) {
+          log.push(`r${round}:expired-mid`);
+          const reload = challenge.locator('#recaptcha-reload-button, .rc-button-reload').first();
+          const clicked = await rawClickFrame(page, challenge, reload).catch(() => false);
+          if (!clicked) {
+            await anchor.locator('#recaptcha-anchor').click({ delay: rnd(40, 100) }).catch(() => {});
+            await sleep(1200);
+            await anchor.locator('#recaptcha-anchor').click({ delay: rnd(40, 100) }).catch(() => {});
+          }
+          await sleep(rnd(2000, 3000));
+          challengeStart = Date.now();
+          continue;
+        }
         try {
           fs.mkdirSync('/tmp/rcdebug', { recursive: true });
           fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) }));
