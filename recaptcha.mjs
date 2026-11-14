@@ -397,6 +397,7 @@ export async function solveRecaptcha(opts = {}) {
           x: Math.round(((a.ix + 0.5) / c) * 1000),
           y: Math.round(((a.iy + 0.5) / r) * 1000),
         }));
+        const clicks = picked;
         log.push(`r${round}:model=${model}:matched=${matches.length}/${c * r}`);
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
 
