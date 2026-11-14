@@ -364,18 +364,32 @@ export async function solveRecaptcha(opts = {}) {
           else if (tiles === 4) { cols = 2; rows = 2; }
         } catch {}
 
-        // FAST PER-TILE JUDGE: crop every tile, judge all in parallel with a
-        // tiny prompt+image (3.4s/call, all tiles ~4-5s total) - keeps each
-        // click-cycle ~15s so the challenge never expires.
+        // FAST PER-TILE JUDGE with DOM-precise tile boxes: crop each tile by its own
+        // bounding box (no divide-area guessing), judge all in parallel (~3s/call).
         const c = cols || 3, r = rows || 3;
-        const cellW = shotW / c, cellH = shotH / r;
-        const tiles = [];
-        for (let iy = 0; iy < r; iy++) for (let ix = 0; ix < c; ix++) tiles.push({ ix, iy });
         const instructionShort = (instruction || '').replace(/\s+/g, ' ').replace(/Click verify.*$/i, '').trim();
-        const tilePrompt = `Photo tile from a grid challenge. Does this tile contain ${instructionShort}? Reply ONLY JSON {"match":true} or {"match":false}. Partial views count.`;
-        const answers = await Promise.all(tiles.map(async ({ ix, iy }) => {
+        const tilePrompt = `Is there ${instructionShort || 'the requested object'} in this photo? Reply ONLY JSON {"match":true} or {"match":false}. Partial views count.`;
+        // DOM tile boxes -> page coords -> crop coords
+        let tileBoxes = [];
+        try {
+          const frameEl = await challenge.frameElement();
+          const fb = await frameEl.boundingBox();
+          const tilesLoc = challenge.locator('.rc-image-tile-wrapper');
+          const n = await tilesLoc.count();
+          for (let i = 0; i < n; i++) {
+            const b = await tilesLoc.nth(i).boundingBox().catch(() => null);
+            if (b) tileBoxes.push({ x: Math.round(fb.x + b.x), y: Math.round(fb.y + b.y), w: Math.round(b.width), h: Math.round(b.height) });
+          }
+        } catch {}
+        if (!tileBoxes.length) {
+          // fallback: divide crop evenly
+          const cellW = shotW / c, cellH = shotH / r;
+          for (let iy = 0; iy < r; iy++) for (let ix = 0; ix < c; ix++)
+            tileBoxes.push({ x: Math.round(ix * cellW), y: Math.round(iy * cellH), w: Math.round(cellW), h: Math.round(cellH) });
+        }
+        const answers = await Promise.all(tileBoxes.map(async (b, i) => {
           try {
-            const crop = await sharpCrop(shot, Math.round(ix * cellW), Math.round(iy * cellH), Math.round(cellW), Math.round(cellH));
+            const crop = await sharpCrop(shot, b.x, b.y, b.w, b.h);
             const res = await fetch(APINEX_URL, {
               method: 'POST',
               headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -385,19 +399,20 @@ export async function solveRecaptcha(opts = {}) {
               signal: AbortSignal.timeout(30000),
             });
             const t = await res.text();
-            let j; try { j = JSON.parse(t); } catch { return { ix, iy, match: false }; }
-            const txt = (j?.choices?.[0]?.message?.content || '').trim();
-            const p = parseJsonLoose(txt);
-            return { ix, iy, match: !!(p && p.match) };
-          } catch { return { ix, iy, match: false }; }
+            let j; try { j = JSON.parse(t); } catch { return { i, match: false }; }
+            const p = parseJsonLoose((j?.choices?.[0]?.message?.content || '').trim());
+            return { i, match: !!(p && p.match) };
+          } catch { return { i, match: false }; }
         }));
         const matches = answers.filter((a) => a.match);
-        const picked = matches.map((a) => ({
-          idx: a.iy * c + a.ix,
-          x: Math.round(((a.ix + 0.5) / c) * 1000),
-          y: Math.round(((a.iy + 0.5) / r) * 1000),
-        }));
+        const picked = matches.map((a) => {
+          const ix = a.i % c, iy = Math.floor(a.i / c);
+          return { idx: a.i, x: Math.round(((ix + 0.5) / c) * 1000), y: Math.round(((iy + 0.5) / r) * 1000) };
+        });
         const clicks = picked;
+        log.push(`r${round}:model=${model}:matched=${matches.length}/${tileBoxes.length}`);
+        try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.i) })); } catch {}
+
         log.push(`r${round}:model=${model}:matched=${matches.length}/${c * r}`);
         try { fs.mkdirSync('/tmp/rcdebug', { recursive: true }); fs.writeFileSync(`/tmp/rcdebug/r${round}.json`, JSON.stringify({ instruction, matches: matches.map((a) => a.idx) })); } catch {}
 
