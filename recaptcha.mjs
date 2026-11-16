@@ -96,7 +96,7 @@ async function shotIsBlank(buf) {
   } catch { return false; }
 }
 
-async function waitTileRender(challenge, maxMs = 6000) {
+async function waitTileRender(challenge, imgLoc, maxMs = 6000) {
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs) {
     await sleep(800);
@@ -258,7 +258,18 @@ export async function solveRecaptcha(opts = {}) {
         const rendered = await waitTileRender(challenge, imgLoc);
         if (!rendered) {
           const nTiles = await challenge.locator('.rc-image-tile-wrapper').count().catch(() => 0);
-          log.push(`r${round}:not-rendered:tiles=${nTiles}`);
+          const diag = await challenge.evaluate(() => {
+            const imgs = [...document.querySelectorAll('.rc-image-tile-wrapper img')];
+            const all = [...document.querySelectorAll('img')];
+            return {
+              wrappers: document.querySelectorAll('.rc-image-tile-wrapper').length,
+              wrapperImgs: imgs.length,
+              anyImgs: all.length,
+              ready: imgs.filter((e) => e.complete && e.naturalWidth > 10).length,
+              first: (all[0]?.outerHTML || '').slice(0, 140),
+            };
+          }).catch(() => null);
+          log.push(`r${round}:not-rendered:tiles=${nTiles}:diag=${JSON.stringify(diag)}`);
           await sleep(rnd(1200, 2000));
           challengeStart = Date.now();
           continue;
