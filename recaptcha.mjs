@@ -33,16 +33,12 @@ function challengeHtml(sitekey) {
 function visionPrompt(instruction, cols, rows) {
   const n = cols * rows;
   return [
-    'You are analyzing a screenshot of a reCAPTCHA image challenge.',
+    'You are analyzing a screenshot of a reCAPTCHA image grid (no header, only the tiles).',
     `The challenge asks: "${instruction || 'select all images matching the requested category'}".`,
-    `The image is a ${cols}x${rows} grid of ${n} photo tiles, indexed 0-${n - 1} row-major (0 = top-left, across each row).`,
-    'Tiles may look distorted (posterized/noisy) on purpose - judge the content anyway.',
-    'A tile matches if ANY part of the requested object is visible in it - including PARTIAL objects at tile edges (a few stripes of a crosswalk, a wheel of a car, a corner of a sign).',
-    'CRITICAL: Google deliberately puts partial/edge-fragment views of the object in edge tiles - look closely at every tile boundary for fragments of the pattern/texture associated with the object.',
-    'Do NOT select tiles that are ambiguous, blurred, mostly background, or where you only suspect the object might be.',
-    'Do NOT select tiles showing only background: grass, sky, road, water, walls, fences.',
-    'Ignore tiles already marked with a blue/white checkmark overlay.',
-    '',
+    `The grid is ${cols}x${rows} = ${n} tiles, indexed 0-${n - 1} row-major (0 = top-left).`,
+    'Tiles look distorted (posterized/noisy) on purpose - judge the content anyway.',
+    'Mark a tile true ONLY if a clearly identifiable instance of the requested object is visible in it. A clearly identifiable partial object at a tile edge also counts.',
+    'Be conservative. If you are not sure, mark it false. Do not select roads, sky, grass, water, walls, ordinary cars, or background unless they are the requested object.',
     'Return ONLY JSON, exactly:',
     `{"tiles":[${Array(n).fill('true|false').join(',')}]}  -> e.g. {"tiles":[true,false,false,true,false,false,false,false,true]}`,
     `The array MUST have exactly ${n} boolean entries, entry i = whether tile i should be selected.`,
@@ -57,6 +53,21 @@ async function findImageLoc(challenge) {
     } catch {}
   }
   return challenge.locator('body');
+}
+
+async function findGridLoc(challenge) {
+  for (const sel of [
+    '.rc-imageselect-table-33',
+    '.rc-imageselect-table-44',
+    '.rc-imageselect-table-22',
+    '.rc-imageselect-target table',
+  ]) {
+    const loc = challenge.locator(sel).first();
+    try {
+      if (await loc.isVisible()) return loc;
+    } catch {}
+  }
+  return findImageLoc(challenge);
 }
 
 async function clickAt(challenge, loc, nx, ny) {
@@ -253,6 +264,7 @@ export async function solveRecaptcha(opts = {}) {
           log.push(`r${round}:refound=${refound}`);
           if (!refound && await anchorChecked(anchor)) { solved = true; break; }
         }
+        challengeStart = Date.now();
         const imgLoc = await findImageLoc(challenge);
         try { await imgLoc.waitFor({ state: 'visible', timeout: 15000 }); } catch {}
         const rendered = await waitTileRender(challenge, imgLoc);
@@ -302,11 +314,13 @@ export async function solveRecaptcha(opts = {}) {
         } catch {}
         const c = cols || 3, r = rows || 3;
 
-        // dynamic grids replace each clicked tile with a fresh image; keep going
-        // until a pass finds no matches, then press the verify button once.
+        // Dynamic grids replace each clicked tile with a fresh image. We can
+        // afford at most two slow (reasoning) model passes inside the ~120s
+        // challenge window, so click reliably and then verify.
+        const MAX_PASSES = 2;
         let innerRounds = 0;
-        for (innerRounds = 1; innerRounds <= 10; innerRounds++) {
-          if (Date.now() - challengeStart > challengeDeadlineMs) break;
+        for (innerRounds = 1; innerRounds <= MAX_PASSES; innerRounds++) {
+          if (Date.now() - challengeStart > challengeDeadlineMs - 10000) break;
           await waitTileRender(challenge, imgLoc);
           await waitAllDeselected(challenge);
 
@@ -318,11 +332,12 @@ export async function solveRecaptcha(opts = {}) {
             .first().innerText().catch(() => '');
           const instruction = (instructionStrong || instructionFull || '').replace(/\s+/g, ' ').trim();
 
+          const gridLoc = await findGridLoc(challenge);
           const vp = page.viewportSize(); const pageW = vp.width, pageH = vp.height;
           let pageBuf = await page.screenshot({ type: 'png', animations: 'disabled' });
           let shot = pageBuf;
           try {
-            const bb = await imgLoc.boundingBox();
+            const bb = await gridLoc.boundingBox();
             if (bb) {
               const gx = Math.max(0, Math.round(bb.x)), gy = Math.max(0, Math.round(bb.y));
               const gw = Math.min(pageW - gx, Math.round(bb.width)), gh = Math.min(pageH - gy, Math.round(bb.height));
@@ -338,7 +353,7 @@ export async function solveRecaptcha(opts = {}) {
           const gridPrompt = visionPrompt(instruction, c, r);
           let picked = [];
           let mUsed = '';
-          for (let attempt = 0; attempt < Math.min(3, models.length); attempt++) {
+          for (let attempt = 0; attempt < Math.min(2, models.length); attempt++) {
             const mm = models[(round - 1 + attempt) % models.length];
             try {
               const p = await visionJson({
@@ -347,7 +362,7 @@ export async function solveRecaptcha(opts = {}) {
                 ...opts,
                 modelOverride: mm,
                 maxTokens: 2000,
-                timeoutMs: 90000,
+                timeoutMs: 75000,
               });
               if (p && Array.isArray(p.tiles) && p.tiles.length === c * r) {
                 mUsed = mm;
@@ -381,34 +396,36 @@ export async function solveRecaptcha(opts = {}) {
 
           if (picked.length === 0) break;
 
-          let tileBoxes = [];
-          try {
-            const tilesLoc = challenge.locator('.rc-image-tile-wrapper');
-            const n = await tilesLoc.count();
-            for (let i = 0; i < n; i++) {
-              const b = await tilesLoc.nth(i).boundingBox().catch(() => null);
-              if (b) tileBoxes.push(b);
-            }
-          } catch {}
+          const beforeSrc = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
+            (els) => els.map((e) => e.getAttribute('src') || '')).catch(() => []);
 
           for (let ci = 0; ci < picked.length; ci++) {
-            const b = tileBoxes[picked[ci].idx];
-            if (b) {
-              const pg = challenge.page();
-              await pg.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 4 });
-              await pg.mouse.down();
-              await sleep(rnd(30, 70));
-              await pg.mouse.up();
-            } else {
-              const ix = picked[ci].idx % c, iy = Math.floor(picked[ci].idx / c);
-              await clickAt(challenge, imgLoc, ((ix + 0.5) / c) * 1000, ((iy + 0.5) / r) * 1000);
+            const idx = picked[ci].idx;
+            let b = null;
+            for (const sel of ['.rc-imageselect-tile', '.rc-image-tile-wrapper']) {
+              b = await challenge.locator(sel).nth(idx).boundingBox().catch(() => null);
+              if (b) break;
             }
-            if (ci < picked.length - 1) await sleep(rnd(700, 1200));
+            if (!b) continue;
+            const pg = challenge.page();
+            await pg.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 4 });
+            await pg.mouse.down();
+            await sleep(rnd(40, 90));
+            await pg.mouse.up();
+            for (let w = 0; w < 10; w++) {
+              await sleep(300);
+              const sel = await challenge.locator('.rc-imageselect-tile').nth(idx)
+                .evaluate((e) => e.classList.contains('rc-imageselect-tileselected') || e.getAttribute('aria-checked') === 'true')
+                .catch(() => false);
+              if (sel) break;
+              const src = await challenge.locator('.rc-image-tile-wrapper img').nth(idx)
+                .getAttribute('src').catch(() => null);
+              if (src && beforeSrc[idx] && src !== beforeSrc[idx]) break;
+            }
+            if (ci < picked.length - 1) await sleep(rnd(500, 900));
           }
 
-          const replaced = await waitTileReplaced(challenge);
-          await sleep(rnd(600, 1200));
-          if (!replaced) break;
+          await sleep(rnd(600, 1000));
         }
 
         const clicked = await clickVerify(challenge);
