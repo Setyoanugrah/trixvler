@@ -72,8 +72,11 @@ const server = http.createServer(async (req, res) => {
      sitekey: j.sitekey,
      pageurl: j.pageurl,
      maxRounds: j.maxRounds,
+     maxPasses: j.maxPasses,
      models: j.models,
      provider: j.provider,
+     agentrouterKey: j.agentrouterKey,
+     agentrouterModel: j.agentrouterModel,
      });
     stats.rcTotal++;
     if (out.ok) stats.rcOk++;

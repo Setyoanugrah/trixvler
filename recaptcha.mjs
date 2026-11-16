@@ -325,10 +325,10 @@ export async function solveRecaptcha(opts = {}) {
         } catch {}
         const c = cols || 3, r = rows || 3;
 
-        // Dynamic grids replace each clicked tile with a fresh image. We can
-        // afford at most two slow (reasoning) model passes inside the ~120s
-        // challenge window, so click reliably and then verify.
-        const MAX_PASSES = 2;
+        // Dynamic grids may replace clicked tiles. A second model pass is slow
+        // (~30s) and prone to false positives, so default to one pass + verify
+        // and rely on the outer round loop to retry a fresh challenge.
+        const MAX_PASSES = Math.max(1, Math.min(Number(opts.maxPasses) || 1, 3));
         let innerRounds = 0;
         for (innerRounds = 1; innerRounds <= MAX_PASSES; innerRounds++) {
           if (Date.now() - challengeStart > challengeDeadlineMs - 10000) break;
