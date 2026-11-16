@@ -1,6 +1,7 @@
 import { PNG } from 'pngjs';
 import jpeg from 'jpeg-js';
 import fs from 'node:fs';
+import { visionText, aiConfig } from './ai.mjs';
 
 const G = 16;
 const CELL_W = 40;
@@ -236,87 +237,71 @@ export function analyze(png, opts = {}) {
 }
 
 export async function aiFallback(b64, opts = {}) {
-  const key = opts.apiKey || process.env.APINEX_KEY;
-  if (!key) return null;
-  const model = opts.model || process.env.APINEX_MODEL || 'free/gemini-3.8-flash';
-  const nHint = opts.n; // CV guess, may be wrong - model recount wins
+  const conf = aiConfig(opts);
+  if (!conf.key) return null;
+  const nHint = opts.n; // CV guess, may be wrong - model count wins
   const sys = [
-    'You are a visual comparison assistant. Given an image containing icons in a horizontal row (index 0 = leftmost), find the icon(s) whose TYPE is the RAREST - the type that appears fewer times than every other type.',
-    '',
-    'Return ONLY valid JSON: {"n":int,"odd_indices":[int],"confidence":float,"counts":[int]}',
-    '- n: how many icons you actually see in the row. Count carefully.',
-    '- counts: array of n integers; counts[i] = how many times the type of icon i appears in the row.',
-    '- Icons shown rotated (0/90/180/270 degrees) or mirrored count as the SAME type.',
-    '- If all icons have the same type, odd_indices=[] and confidence=0.',
-    '- Never return more than half of n as odd.',
-    '- counts must sum to n. Do not round or equalize counts.',
-    '- Each counts[i] >= 1.',
-    '- Always return your best guess.',
+    'You are shown a horizontal row of icons separated by vertical lines, ordered left to right.',
+    'For each icon assign a type id. Icons with the SAME shape (even if rotated 0/90/180/270 degrees or mirrored) get the SAME id.',
+    'The first distinct shape gets id 0, the next new shape id 1, then 2, etc.',
+    'Return ONLY JSON: {"types":[int,...]} with one integer per icon, in left-to-right order.',
+    'Do not explain. Do not skip icons.',
   ].join('\n');
-  const user = [
-    nHint ? `CV heuristic guesses ${nHint} icons - verify by counting yourself; your count wins if different.` : 'Image contains a row of icons.',
-    'Verify: sum(counts) == n before responding.',
-    'Return JSON.',
-  ].join('\n');
-  const body = {
-    model,
-    temperature: 0,
-    max_tokens: 500,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: sys + '\n\n' + user },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,' + b64 } },
-      ],
-    }],
-  };
-
+  const user = nHint
+    ? `A heuristic guesses ${nHint} icons - count yourself; return one id per icon you actually see.`
+    : 'Return one id per icon you actually see.';
+  const modelList = Array.isArray(opts.models) && opts.models.length
+    ? opts.models
+    : conf.provider === 'agentrouter'
+      ? [...new Set([conf.model, 'gpt-6.1-sol', 'gpt-5.6-sol'])]
+      : [conf.model];
   let lastFail = null;
-  let p = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-  try {
-    const res = await fetch('https://api.apinex.bond/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-});
-    const j = await res.json();
-    let txt = j?.choices?.[0]?.message?.content || '';
-    txt = String(txt).replace(/```(?:json)?/gi, '').trim();
-    const m = txt.match(/\{[\s\S]*\}/);
-    if (!m) { lastFail = 'no-json'; continue; }
-    try { p = JSON.parse(m[0]); } catch { lastFail = 'json-parse'; continue; }
+    try {
+      const txt = await visionText({ imageB64: b64, prompt: sys + '\n\n' + user, ...opts, modelOverride: modelList[attempt % modelList.length], maxTokens: 1500 });
+      const clean = String(txt).replace(/```(?:json)?/gi, '').trim();
+      const m = clean.match(/\{[\s\S]*\}/);
+      if (!m) { lastFail = 'no-json'; continue; }
+      let p;
+      try { p = JSON.parse(m[0]); } catch { lastFail = 'json-parse'; continue; }
 
-    // ---- deterministic validation gate (counts is the source of truth) ----
-    // n comes from the MODEL's own count (CV inferN is unreliable on odd aspect ratios)
-    const mN = Number(p.n);
-    const counts = Array.isArray(p.counts) ? p.counts.map((x) => Number(x)) : null;
-    if (!counts || !Number.isInteger(mN) || mN < 3 || mN > 20) { lastFail = 'n_invalid'; continue; }
-    if (counts.length !== mN) { lastFail = 'counts_shape'; continue; }
-    if (counts.some((x) => !Number.isFinite(x) || x < 1)) { lastFail = 'counts_range'; continue; }
-    const sumCounts = counts.reduce((a, b) => a + b, 0);
-    if (sumCounts !== mN) { lastFail = 'counts_sum_mismatch'; continue; }
+      // accept {"types":[ids]} (preferred) or {"icons":[names]}
+      let typeIds = null;
+      if (Array.isArray(p.types)) {
+        typeIds = p.types.map((x) => Number(x));
+      } else if (Array.isArray(p.icons)) {
+        const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+        const seen = new Map();
+        typeIds = p.icons.map((name) => {
+          const k = norm(name) || 'unknown';
+          if (!seen.has(k)) seen.set(k, seen.size);
+          return seen.get(k);
+        });
+      }
+      if (!typeIds) { lastFail = 'no-types'; continue; }
 
-    const minCount = Math.min(...counts);
-    const expected = counts.map((c, i) => (c === minCount ? i : -1)).filter((i) => i >= 0);
-    const modelOdd = [...new Set((Array.isArray(p.odd_indices) ? p.odd_indices : []).map((x) => Number(x)).filter((x) => Number.isInteger(x) && x >= 0 && x < mN))].sort((a, b) => a - b);
-    const expectedSorted = [...expected].sort((a, b) => a - b);
-    const same = modelOdd.length === expectedSorted.length && modelOdd.every((v, i) => v === expectedSorted[i]);
+      const n = typeIds.length;
+      if (!Number.isInteger(n) || n < 3 || n > 20) { lastFail = 'n_invalid'; continue; }
+      if (typeIds.some((x) => !Number.isInteger(x) || x < 0)) { lastFail = 'types_invalid'; continue; }
 
-    // group mapping: count value -> [indices]
-    const groupMap = counts.reduce((acc, c2, i) => { (acc[c2] ??= []).push(i); return acc; }, {});
-    const groups = Object.keys(groupMap).map(Number).sort((a, b) => a - b).map((k) => groupMap[k]);
+      const groupMap = new Map();
+      typeIds.forEach((t, i) => { if (!groupMap.has(t)) groupMap.set(t, []); groupMap.get(t).push(i); });
+      const groups = [...groupMap.values()].sort((a, b) => a.length - b.length || a[0] - b[0]);
+      const counts = typeIds.map((t) => groupMap.get(t).length);
+      const minCount = groups[0].length;
+      const minGroups = groups.filter((g) => g.length === minCount);
+      const tie = minGroups.length > 1;
+      const candidates = tie
+        ? minGroups.flat().sort((a, b) => a - b)
+        : [...minGroups[0]];
+      const index = tie ? null : candidates[0];
 
-    const conf = Number(p.confidence) || 0;
-    const meta = { modelN: mN, groups, counts, confidence: conf, agree: same };
-    if (expected.length > 1) {
-      return { index: null, tie: true, candidates: expected, ...meta, source: 'ai' };
+      const meta = { modelN: n, groups, counts, confidence: tie ? 0 : 1, agree: true, types: typeIds, tiles: typeIds };
+      return { index, tie, candidates, ...meta, source: 'ai' };
+    } catch (e) {
+      lastFail = 'exception:' + (e.message || '');
     }
-    return { index: expected[0], ...meta, source: 'ai' };
-  } catch (e) {
-    lastFail = 'exception:' + (e.message || '');
   }
-  } // retry
   return lastFail ? { fail: lastFail, source: 'ai' } : null;
 }
 
@@ -328,7 +313,7 @@ export async function solve(buffer, opts = {}) {
     if (box) img = cropImage(img, box);
   }
   const local = analyze(img, opts);
-  const mode = opts.mode || 'auto';
+  const mode = opts.useAI === false ? 'local' : (opts.mode || 'auto');
   if (mode === 'local') return { ...local, source: 'local' };
   const needAI = mode === 'ai' || local.tie;
   if (!needAI) return { ...local, source: 'local' };

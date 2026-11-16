@@ -72,6 +72,8 @@ const server = http.createServer(async (req, res) => {
      sitekey: j.sitekey,
      pageurl: j.pageurl,
      maxRounds: j.maxRounds,
+     models: j.models,
+     provider: j.provider,
      });
     stats.rcTotal++;
     if (out.ok) stats.rcOk++;
@@ -97,6 +99,8 @@ const server = http.createServer(async (req, res) => {
     const out = await solve(buf, {
       apiKey: process.env.APINEX_KEY,
       model: process.env.APINEX_MODEL,
+      agentrouterKey: process.env.AGENTROUTER_KEY,
+      agentrouterModel: process.env.AGENTROUTER_MODEL,
       n: j.n,
       threshold: j.threshold,
       mode: j.mode || 'auto',
