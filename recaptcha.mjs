@@ -153,11 +153,22 @@ async function rawClickFrame(page, challenge, loc) {
 }
 
 async function clickVerify(challenge) {
+  const btn = challenge.locator('#recaptcha-verify-button').first();
+  try { await btn.scrollIntoViewIfNeeded({ timeout: 3000 }); } catch {}
+  const b = await btn.boundingBox().catch(() => null);
+  if (b) {
+    const pg = challenge.page();
+    await pg.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 5 });
+    await pg.mouse.down();
+    await sleep(rnd(40, 90));
+    await pg.mouse.up();
+    return true;
+  }
   try {
     return await challenge.evaluate(() => {
-      const b = document.getElementById('recaptcha-verify-button');
-      if (!b) return false;
-      b.click();
+      const el = document.getElementById('recaptcha-verify-button');
+      if (!el) return false;
+      el.click();
       return true;
     });
   } catch { return false; }
@@ -425,7 +436,11 @@ export async function solveRecaptcha(opts = {}) {
             if (ci < picked.length - 1) await sleep(rnd(500, 900));
           }
 
-          await sleep(rnd(600, 1000));
+          await sleep(rnd(1200, 1800));
+          const afterSrc = await challenge.locator('.rc-image-tile-wrapper img').evaluateAll(
+            (els) => els.map((e) => e.getAttribute('src') || '')).catch(() => []);
+          const anyReplaced = afterSrc.some((v, i) => beforeSrc[i] && v !== beforeSrc[i]);
+          if (!anyReplaced) { log.push(`r${round}.${innerRounds}:static`); break; }
         }
 
         const clicked = await clickVerify(challenge);
