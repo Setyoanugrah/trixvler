@@ -35,13 +35,14 @@ function visionPrompt(instruction, cols, rows) {
   return [
     'You are analyzing a screenshot of a reCAPTCHA image grid (no header, only the tiles).',
     `The challenge asks: "${instruction || 'select all images matching the requested category'}".`,
-    `The grid is ${cols}x${rows} = ${n} tiles, indexed 0-${n - 1} row-major (0 = top-left).`,
+    `The grid is ${cols}x${rows} = ${n} tiles, indexed 0-${n - 1} row-major (0 = top-left, across each row).`,
     'Tiles look distorted (posterized/noisy) on purpose - judge the content anyway.',
-    'Mark a tile true ONLY if a clearly identifiable instance of the requested object is visible in it. A clearly identifiable partial object at a tile edge also counts.',
-    'Be conservative. If you are not sure, mark it false. Do not select roads, sky, grass, water, walls, ordinary cars, or background unless they are the requested object.',
-    'Return ONLY JSON, exactly:',
-    `{"tiles":[${Array(n).fill('true|false').join(',')}]}  -> e.g. {"tiles":[true,false,false,true,false,false,false,false,true]}`,
-    `The array MUST have exactly ${n} boolean entries, entry i = whether tile i should be selected.`,
+    `First describe each tile 0-${n - 1} in at most 6 words, one per line ("Tile i: ...").`,
+    'A tile matches if the requested object, or a clearly identifiable part of it (including at a tile edge), is visible.',
+    'Do not mark roads, sky, grass, water, walls, ordinary cars, or background unless they are the requested object.',
+    'Then on the LAST line return ONLY JSON:',
+    `{"tiles":[${Array(n).fill('true|false').join(',')}]}`,
+    `with exactly ${n} booleans; entry i = whether tile i should be selected.`,
   ].join('\n');
 }
 
@@ -191,7 +192,9 @@ export async function solveRecaptcha(opts = {}) {
     ? opts.models
     : conf.provider === 'agentrouter'
       ? ['gpt-6.1-sol', 'gpt-5.6-sol']
-      : ['free/gemini-3.8-flash', 'free/qwen-3.8-max', 'free/gpt-6-luna'];
+      : conf.provider === 'numes'
+        ? ['z-ai/glm-5.3-flash:free', 'dealignai/deepseek-v4.1-flash-uncensored-fp8:free']
+        : ['free/gemini-3.8-flash', 'free/qwen-3.8-max', 'free/gpt-6-luna'];
 
   const challengeDeadlineMs = 150000;
   let challengeStart = Date.now();
@@ -328,7 +331,8 @@ export async function solveRecaptcha(opts = {}) {
         // Dynamic grids may replace clicked tiles. A second model pass is slow
         // (~30s) and prone to false positives, so default to one pass + verify
         // and rely on the outer round loop to retry a fresh challenge.
-        const MAX_PASSES = Math.max(1, Math.min(Number(opts.maxPasses) || 1, 3));
+        const defaultPasses = conf.provider === 'numes' ? 3 : 1;
+        const MAX_PASSES = Math.max(1, Math.min(Number(opts.maxPasses) || defaultPasses, 4));
         let innerRounds = 0;
         for (innerRounds = 1; innerRounds <= MAX_PASSES; innerRounds++) {
           if (Date.now() - challengeStart > challengeDeadlineMs - 10000) break;
@@ -365,7 +369,7 @@ export async function solveRecaptcha(opts = {}) {
           let picked = [];
           let mUsed = '';
           for (let attempt = 0; attempt < Math.min(2, models.length); attempt++) {
-            const mm = models[(round - 1 + attempt) % models.length];
+            const mm = models[attempt] || models[0];
             try {
               const p = await visionJson({
                 imageB64: shot.toString('base64'),

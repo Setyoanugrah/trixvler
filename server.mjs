@@ -77,6 +77,8 @@ const server = http.createServer(async (req, res) => {
      provider: j.provider,
      agentrouterKey: j.agentrouterKey,
      agentrouterModel: j.agentrouterModel,
+     numesKey: j.numesKey,
+     numesModel: j.numesModel,
      });
     stats.rcTotal++;
     if (out.ok) stats.rcOk++;
@@ -104,6 +106,8 @@ const server = http.createServer(async (req, res) => {
       model: process.env.APINEX_MODEL,
       agentrouterKey: process.env.AGENTROUTER_KEY,
       agentrouterModel: process.env.AGENTROUTER_MODEL,
+      numesKey: process.env.NUMES_KEY,
+      numesModel: process.env.NUMES_MODEL,
       n: j.n,
       threshold: j.threshold,
       mode: j.mode || 'auto',

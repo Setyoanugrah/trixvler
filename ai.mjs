@@ -23,12 +23,23 @@ import path from 'node:path';
 const AGENTROUTER_URL = process.env.AGENTROUTER_URL || 'https://agentrouter.org/v1/responses';
 const AGENTROUTER_UA = 'opencode/0.1.0';
 const APINEX_URL = 'https://api.apinex.bond/v1/chat/completions';
+const NUMES_URL = 'https://api.numes.ai/api/v1/chat/completions';
+const NUMES_DEFAULT_MODEL = 'z-ai/glm-5.3-flash:free';
 
 export function aiConfig(opts = {}) {
   const explicit = opts.provider || process.env.AI_PROVIDER;
   const hasAgentrouter = !!(opts.agentrouterKey || process.env.AGENTROUTER_KEY);
-  const provider = explicit || (hasAgentrouter ? 'agentrouter' : 'apinex');
+  const hasNumes = !!(opts.numesKey || process.env.NUMES_KEY);
+  const provider = explicit || (hasNumes ? 'numes' : hasAgentrouter ? 'agentrouter' : 'apinex');
 
+  if (provider === 'numes') {
+    return {
+      provider,
+      url: NUMES_URL,
+      key: opts.numesKey || process.env.NUMES_KEY || '',
+      model: opts.numesModel || process.env.NUMES_MODEL || NUMES_DEFAULT_MODEL,
+    };
+  }
   if (provider === 'agentrouter') {
     return {
       provider,
@@ -141,6 +152,34 @@ async function apinexVision({ imageB64, prompt, key, model, maxTokens, timeoutMs
   return String(j?.choices?.[0]?.message?.content || '').trim();
 }
 
+async function numesVision({ imageB64, prompt, key, model, maxTokens, timeoutMs }) {
+  const body = {
+    model,
+    temperature: 0,
+    max_tokens: maxTokens,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,' + imageB64 } },
+      ],
+    }],
+  };
+  const res = await fetch(NUMES_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`numes-http-${res.status}: ${raw.slice(0, 200)}`);
+  let j;
+  try { j = JSON.parse(raw); } catch { throw new Error('numes-non-json: ' + raw.slice(0, 160)); }
+  const c = j?.choices?.[0]?.message?.content;
+  if (Array.isArray(c)) return c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('').trim();
+  return String(c || '').trim();
+}
+
 // Returns the model's raw text answer for a single image + prompt.
 export async function visionText(opts = {}) {
   const conf = aiConfig(opts);
@@ -151,6 +190,18 @@ export async function visionText(opts = {}) {
   const timeoutMs = opts.timeoutMs || 120000;
   const model = opts.modelOverride || conf.model;
 
+  if (conf.provider === 'numes') {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await numesVision({ imageB64: opts.imageB64, prompt, key: conf.key, model, maxTokens, timeoutMs });
+      } catch (e) {
+        lastErr = e;
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+    throw lastErr;
+  }
   if (conf.provider === 'agentrouter') {
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -177,9 +228,14 @@ export async function visionText(opts = {}) {
 }
 
 function parseJsonLoose(txt) {
-  const m = String(txt).replace(/```(?:json)?/gi, '').match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try { return JSON.parse(m[0]); } catch { return null; }
+  const clean = String(txt).replace(/```(?:json)?/gi, '');
+  const flat = clean.match(/\{[\s\S]*?\}/g) || [];
+  for (let i = flat.length - 1; i >= 0; i--) {
+    try { return JSON.parse(flat[i]); } catch {}
+  }
+  const greedy = clean.match(/\{[\s\S]*\}/);
+  if (greedy) { try { return JSON.parse(greedy[0]); } catch {} }
+  return null;
 }
 
 // Returns a parsed JSON object from the model answer, or null.
