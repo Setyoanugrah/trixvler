@@ -152,20 +152,26 @@ export async function visionText(opts = {}) {
   const model = opts.modelOverride || conf.model;
 
   if (conf.provider === 'agentrouter') {
-    try {
-      return await agentrouterVision({
-        imageB64: opts.imageB64, prompt, key: conf.key, model, maxTokens, timeoutMs, proxy: conf.proxy,
-      });
-    } catch (e) {
-      const apxKey = process.env.APINEX_KEY;
-      if (apxKey && opts.noFallback !== true) {
-        return apinexVision({
-          imageB64: opts.imageB64, prompt, key: apxKey,
-          model: process.env.APINEX_MODEL || 'free/gemini-3.8-flash', maxTokens, timeoutMs,
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await agentrouterVision({
+          imageB64: opts.imageB64, prompt, key: conf.key, model, maxTokens, timeoutMs, proxy: conf.proxy,
         });
+      } catch (e) {
+        lastErr = e;
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
       }
-      throw e;
     }
+    // APINEX's free tier is gone; only use it if explicitly enabled with a
+    // funded key, otherwise surface the real agentrouter error.
+    if (opts.noFallback !== true && process.env.APINEX_FALLBACK === '1' && process.env.APINEX_KEY) {
+      return apinexVision({
+        imageB64: opts.imageB64, prompt, key: process.env.APINEX_KEY,
+        model: process.env.APINEX_MODEL || 'free/gemini-3.8-flash', maxTokens, timeoutMs,
+      });
+    }
+    throw lastErr;
   }
   return apinexVision({ imageB64: opts.imageB64, prompt, key: conf.key, model, maxTokens, timeoutMs });
 }
