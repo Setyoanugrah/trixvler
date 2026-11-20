@@ -92,10 +92,15 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -u
+          set +e
           xvfb-run -a node server.mjs > server.log 2>&1 &
           SRV=$!
-          sleep 2
+          for h in $(seq 1 25); do
+            sleep 1
+            curl -sf localhost:8080/health >/dev/null && break
+          done
           curl -s localhost:8080/health; echo
+          tail -5 server.log || true
 
           if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
             cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" > cfn.log 2>&1 &
