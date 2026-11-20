@@ -35,8 +35,8 @@ jobs:
 
       - name: Python deps (vision)
         run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-opencv python3-numpy >/dev/null
+          python3 -m pip --version >/dev/null 2>&1 || sudo apt-get install -y -qq python3-pip >/dev/null
+          sudo python3 -m pip install --break-system-packages --no-cache-dir -q numpy opencv-python-headless
           python3 -c "import cv2, numpy; print('cv2', cv2.__version__, 'numpy', numpy.__version__)"
 
       - name: Tailscale
