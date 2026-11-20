@@ -33,6 +33,12 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Python deps (vision)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-opencv python3-numpy >/dev/null
+          python3 -c "import cv2, numpy; print('cv2', cv2.__version__, 'numpy', numpy.__version__)"
+
       - name: Tailscale
         uses: tailscale/github-action@v2
         with:
@@ -49,10 +55,14 @@ jobs:
           echo "trix:$PW" | sudo chpasswd
           echo "trix ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/trix >/dev/null
           sudo chmod 440 /etc/sudoers.d/trix
+          sudo mkdir -p /etc/ssh/sshd_config.d /run/sshd
           printf '%s\n' 'PasswordAuthentication yes' 'KbdInteractiveAuthentication no' 'PermitRootLogin no' 'Port 22' | sudo tee /etc/ssh/sshd_config.d/99-trix.conf >/dev/null
-          sudo mkdir -p /run/sshd
+          grep -q '^Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config || echo 'Include /etc/ssh/sshd_config.d/*.conf' | sudo tee -a /etc/ssh/sshd_config >/dev/null
+          sudo sed -i -E 's/^#?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i -E 's/^#?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
           sudo /usr/sbin/sshd -t
-          sudo service ssh restart || sudo /usr/sbin/sshd
+          sudo systemctl restart ssh 2>/dev/null || sudo service ssh restart 2>/dev/null || sudo /usr/sbin/sshd
+          sudo /usr/sbin/sshd -T 2>/dev/null | grep -i passwordauth || true
 
       - name: Credential
         run: |
