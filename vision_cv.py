@@ -340,7 +340,7 @@ ROUTE = {
     'no_wings': 'p20_lo', 'arms_legs': 'armleg_hi', 'eyes': 'eyes_fused_hi',
     'stripes': 'stripe_hi', 'upside': 'clip_hi', 'lying': 'p20_hi',
     'biggest_smallest': 'area_ext', 'biggest': 'area_ext', 'smallest': 'area_ext',
-    'different_body': 'clip_hi',
+    'different_body': 'stripe_lo',
 }
 
 
