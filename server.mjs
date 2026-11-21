@@ -39,6 +39,8 @@ const authorized = (req) => {
 };
 
 const server = http.createServer(async (req, res) => {
+  req.socket?.on('error', () => {});
+  res.on('error', () => {});
   const url = (req.url || '/').split('?')[0];
 
   if (req.method === 'GET' && (url === '/' || url === '/index.html')) {
