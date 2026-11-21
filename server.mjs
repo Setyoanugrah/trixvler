@@ -6,6 +6,11 @@ import { solve } from './trixvler.mjs';
 import { solveRecaptcha } from './recaptcha.mjs';
 import { solveTurnstile } from './turnstile.mjs';
 
+process.on('uncaughtException', (e) => {
+  if (e && (e.code === 'EPIPE' || e.code === 'ECONNRESET')) return;
+  console.error('uncaught', e);
+});
+
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.TRIXVLER_KEY || '';
