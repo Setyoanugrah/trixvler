@@ -37,7 +37,13 @@ jobs:
         run: |
           python3 -m pip --version >/dev/null 2>&1 || sudo apt-get install -y -qq python3-pip >/dev/null
           sudo python3 -m pip install --break-system-packages --no-cache-dir -q numpy opencv-python-headless
-          python3 -c "import cv2, numpy; print('cv2', cv2.__version__, 'numpy', numpy.__version__)"
+          python3 -m pip install --break-system-packages -q torch --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install --break-system-packages -q --force-reinstall --no-deps torchvision --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install --break-system-packages -q timm open_clip_torch
+          python3 -c "import cv2, numpy, torch, timm, open_clip; print('cv2', cv2.__version__, 'torch', torch.__version__)"
+          sudo mkdir -p /tmp/modelcache && sudo chmod 777 /tmp/modelcache
+          echo "HF_HOME=/tmp/modelcache" >> "$GITHUB_ENV"
+          HF_HOME=/tmp/modelcache python3 -c "import timm, open_clip; timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True, num_classes=0, img_size=518); open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai'); print('models cached')"
 
       - name: Tailscale
         uses: tailscale/github-action@v2

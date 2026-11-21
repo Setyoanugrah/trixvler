@@ -1,6 +1,293 @@
-import sys, json, base64, re
+import sys, json, base64, re, os
 import cv2
 import numpy as np
+import torch, timm, open_clip
+from PIL import Image
+import torchvision.transforms as T
+
+W, H = 450, 280
+G = 518 // 14
+CENTERS = [(int((c + 0.5) * W / 4), int((r + 0.5) * H / 2)) for r in range(2) for c in range(4)]
+
+def imread(p): return cv2.imdecode(np.fromfile(p, dtype=np.uint8), cv2.IMREAD_COLOR)
+def cells(sc): return [sc[max(0, cy - 72):min(H, cy + 72), max(0, cx - 60):min(W, cx + 60)] for cx, cy in CENTERS]
+
+def fgmask(im):
+    hsv = cv2.cvtColor(im, cv2.COLOR_BGR2HSV); S = hsv[:, :, 1]; V = hsv[:, :, 2]
+    m = (((S > 90) & (V > 50)) | (V < 90)).astype(np.uint8)
+    return cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+
+def largest_comp(m):
+    n, lab, st, ct = cv2.connectedComponentsWithStats(m)
+    if n <= 1: return None, None
+    i = 1 + int(np.argmax(st[1:, 4]))
+    return (lab == i).astype(np.uint8) * 255, st[i]
+
+def torso_mask(crop):
+    m, st = largest_comp(fgmask(crop))
+    if m is None: return m
+    for k in (11, 9, 7, 5):
+        t = cv2.erode(m, np.ones((k, k), np.uint8))
+        t2, st2 = largest_comp(t)
+        if t2 is not None and st2 is not None and st2[4] > 120:
+            return t2
+    return m
+
+def area_of(crop):
+    m, st = largest_comp(fgmask(crop))
+    return int(st[4]) if st is not None else 0
+
+def angle_of(crop):
+    m, st = largest_comp(fgmask(crop))
+    if m is None: return 90.0
+    ys, xs = np.where(m > 0)
+    if len(xs) < 10: return 90.0
+    pts = np.stack([xs, ys], 1).astype(np.float32)
+    _, eig, _ = cv2.PCACompute2(pts, mean=None)
+    return float(np.degrees(np.arctan2(eig[0, 1], eig[0, 0]))) % 180
+
+def body_desc(crop):
+    t = torso_mask(crop)
+    if t is None: return np.zeros(6, np.float32)
+    cnts, _ = cv2.findContours(t, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts: return np.zeros(6, np.float32)
+    c = max(cnts, key=cv2.contourArea)
+    a = cv2.contourArea(c)
+    if a < 50: return np.zeros(6, np.float32)
+    x, y, w, h = cv2.boundingRect(c)
+    peri = cv2.arcLength(c, True)
+    ha = cv2.contourArea(cv2.convexHull(c))
+    circ = 4 * np.pi * a / (peri * peri + 1e-6)
+    sol = a / (ha + 1e-6)
+    ap = cv2.approxPolyDP(c, 0.03 * peri, True)
+    return np.array([w / (h + 1e-6), a / (w * h + 1e-6), circ, sol, len(ap) / 10.0, a / 5000.0], np.float32)
+
+def radial(crop):
+    m, st = largest_comp(fgmask(crop))
+    if m is None: return None
+    M = cv2.moments(m)
+    if M['m00'] == 0: return None
+    cx = M['m10'] / M['m00']; cy = M['m01'] / M['m00']
+    angs = np.arange(0, 360, 10); rs = []
+    for a in angs:
+        th = np.radians(a); dx = np.cos(th); dy = np.sin(th); r = 0
+        for t in range(1, 130):
+            x = int(round(cx + dx * t)); y = int(round(cy + dy * t))
+            if x < 0 or y < 0 or x >= crop.shape[1] or y >= crop.shape[0]: break
+            if m[y, x] > 0: r = t
+        rs.append(r)
+    rs = np.array(rs, float); pos = rs[rs > 5]
+    if len(pos) == 0: return None
+    return np.radians(angs), rs / float(np.median(pos))
+
+def wing_energy(crop):
+    o = radial(crop)
+    if o is None: return 0.0
+    a, rn = o; lat = np.abs(np.cos(a)) ** 6; w = np.maximum(0, rn - 1.0)
+    return float((w * lat).sum())
+
+def limb_energy(crop):
+    o = radial(crop)
+    if o is None: return 0.0
+    a, rn = o; lat = np.abs(np.cos(a)) ** 2; bot = np.maximum(0, np.sin(a)) ** 2
+    w = np.maximum(0, rn - 1.0)
+    return float((w * (lat + bot)).sum())
+
+def stripe_score(crop):
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3); gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy); ang = np.degrees(np.arctan2(gy, gx)) % 180
+    t = torso_mask(crop)
+    if t is None or t.sum() < 30: return 0.0
+    thr = np.percentile(mag[t > 0], 75)
+    sel = (mag > thr) & (t > 0)
+    if sel.sum() < 10: return 0.0
+    h, _ = np.histogram(ang[sel], bins=18, range=(0, 180))
+    h = h.astype(float); h /= (h.sum() + 1e-6)
+    return float(h.max() - h.mean())
+
+def eye_count(crop):
+    t = torso_mask(crop)
+    if t is None: return 0.0
+    ys, xs = np.where(t > 0)
+    if len(xs) < 20: return 0.0
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 2] > 140) & (hsv[:, :, 1] < 95)).astype(np.uint8)
+    n, lab, st, ct = cv2.connectedComponentsWithStats(white)
+    cnt = 0
+    for i in range(1, n):
+        a = st[i, 4]
+        if a < 12 or a > 500: continue
+        cx, cy = ct[i]
+        if not (x0 - 4 <= cx <= x1 + 4 and y0 - 4 <= cy <= y1 + 4): continue
+        if cy > (y0 + y1) / 2 + 3: continue
+        w = st[i, 2]; h = st[i, 3]
+        if 0.35 < w / (h + 1e-6) < 2.8: cnt += 1
+    return cnt
+
+def eye_score(crop):
+    return -abs(eye_count(crop) - 2)
+
+def eye_centers(crop):
+    t = torso_mask(crop)
+    if t is None: return []
+    ys, xs = np.where(t > 0)
+    if len(xs) < 20: return []
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 2] > 140) & (hsv[:, :, 1] < 95)).astype(np.uint8)
+    n, lab, st, ct = cv2.connectedComponentsWithStats(white)
+    out = []
+    for i in range(1, n):
+        a = st[i, 4]
+        if a < 12 or a > 500: continue
+        cx, cy = ct[i]
+        if not (x0 - 4 <= cx <= x1 + 4 and y0 - 4 <= cy <= y1 + 4): continue
+        if cy > (y0 + y1) / 2 + 3: continue
+        w = st[i, 2]; h = st[i, 3]
+        if 0.35 < w / (h + 1e-6) < 2.8: out.append((float(cx), float(cy)))
+    return out
+
+def blob_orient_score(crop):
+    t = torso_mask(crop)
+    if t is None: return 0.0
+    ys, xs = np.where(t > 0)
+    if len(xs) < 20: return 0.0
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    dark = ((hsv[:, :, 2] < 115) & (t > 0)).astype(np.uint8)
+    n, lab, st, ct = cv2.connectedComponentsWithStats(dark)
+    best = 0.0
+    for i in range(1, n):
+        a = st[i, 4]
+        if a < 10 or a > 200: continue
+        cx, cy = ct[i]
+        if cy > (y0 + y1) / 2 + 5: continue
+        yy, xx = np.where(lab == i)
+        if len(xx) < 10: continue
+        p = np.stack([xx, yy], 1).astype(np.float32)
+        _, eig, _ = cv2.PCACompute2(p, mean=None)
+        ang = float(np.degrees(np.arctan2(eig[0, 1], eig[0, 0]))) % 180
+        score = float(min(ang, 180 - ang))
+        if score > best: best = score
+    return best
+
+def eyeline_score(crop):
+    pts = eye_centers(crop)
+    if len(pts) < 2: return 0.0
+    p = np.array(pts, np.float32)
+    _, eig, _ = cv2.PCACompute2(p, mean=None)
+    ang = float(np.degrees(np.arctan2(eig[0, 1], eig[0, 0]))) % 180
+    return float(min(ang, 180 - ang))
+
+def torso_angle(crop):
+    t = torso_mask(crop)
+    if t is None: return 90.0
+    ys, xs = np.where(t > 0)
+    if len(xs) < 10: return 90.0
+    pts = np.stack([xs, ys], 1).astype(np.float32)
+    _, eig, _ = cv2.PCACompute2(pts, mean=None)
+    return float(np.degrees(np.arctan2(eig[0, 1], eig[0, 0]))) % 180
+
+def armleg_score(crop):
+    o = radial(crop)
+    if o is None: return 0.0
+    a, rn = o; w = np.maximum(0, rn - 1.1)
+    lat = float((w * np.abs(np.cos(a)) ** 6).sum())
+    bot = float((w * np.maximum(0, np.sin(a)) ** 2).sum())
+    return float(min(lat, bot))
+
+def pupil_count(crop):
+    m, st = largest_comp(fgmask(crop))
+    if m is None: return 0
+    ys, xs = np.where(m > 0)
+    if len(xs) < 20: return 0
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    dark = ((hsv[:, :, 2] < 115) & (m > 0)).astype(np.uint8)
+    face = np.zeros_like(dark)
+    h = y1 - y0; wd = x1 - x0
+    ya = int(y0 + 0.22 * h); yb = int(y0 + 0.58 * h)
+    xa = int(x0 + 0.18 * wd); xb = int(x0 + 0.82 * wd)
+    face[ya:yb, xa:xb] = 1
+    dark = dark * face
+    n, lab, st2, ct = cv2.connectedComponentsWithStats(dark)
+    cnt = 0
+    for i in range(1, n):
+        a = st2[i, 4]; w = st2[i, 2]; hh = st2[i, 3]
+        if a < 3 or a > 100: continue
+        if not (0.4 < w / (hh + 1e-6) < 2.5): continue
+        mm = (lab == i).astype(np.uint8)
+        cs2, _ = cv2.findContours(mm, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cs2: continue
+        peri = cv2.arcLength(cs2[0], True)
+        circ = 4 * np.pi * a / (peri * peri + 1e-6)
+        if circ > 0.45: cnt += 1
+    return cnt
+
+def pupil_score(crop):
+    return -abs(pupil_count(crop) - 2)
+
+# ---- models ----
+dino = timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True, num_classes=0, img_size=518); dino.eval()
+dtf = T.Compose([T.Resize((518, 518)), T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
+d224 = timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True, num_classes=0, img_size=224); d224.eval()
+dtf2 = T.Compose([T.Resize((224, 224)), T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
+clip, _, ctf = open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')
+ctok = open_clip.get_tokenizer('ViT-B-32'); clip.eval()
+PROMPTS = {
+    'upside': ("an upside-down cartoon monster with its feet up", "an upright cartoon monster"),
+    'different_body': ("a cartoon monster with a round body", "a cartoon monster with a square body"),
+    'diff_body': ("a cartoon monster with a round body", "a cartoon monster with a square body"),
+    'no_wings': ("a cartoon monster with no wings", "a cartoon monster with large wings"),
+    'wings': ("a cartoon monster with large wings", "a cartoon monster with no wings"),
+    'eyes': ("a cartoon monster with two eyes", "a cartoon monster with one eye"),
+    'stripes': ("a cartoon monster with stripes on its body", "a cartoon monster with a plain body"),
+    'arms_legs': ("a cartoon monster with arms and legs", "a cartoon monster with wings only"),
+}
+TEXT = {}
+for k, (p, n) in PROMPTS.items():
+    with torch.no_grad():
+        t = clip.encode_text(ctok([p, n])); TEXT[k] = t / t.norm(dim=-1, keepdim=True)
+
+def dino_tokens(model, tf, imgs, mask=True):
+    x = torch.stack([tf(Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))) for im in imgs])
+    with torch.no_grad():
+        f = model.forward_features(x)
+    pat = f[:, model.num_prefix_tokens:]
+    pat = pat / pat.norm(dim=-1, keepdim=True)
+    idxs = []
+    gg = int(round(x.shape[-1] / 14))
+    for im in imgs:
+        mm = cv2.resize(fgmask(im), (gg, gg), interpolation=cv2.INTER_AREA)
+        idx = np.where(mm.reshape(-1) > 0.3)[0]
+        if not mask or len(idx) < 20: idx = np.arange(gg * gg)
+        idxs.append(torch.from_numpy(idx).long())
+    return pat, idxs
+
+def dino_scores(cs, rf):
+    pat, idxs = dino_tokens(dino, dtf, cs + [rf])
+    rp = pat[8]; ri = idxs[8]
+    B = torch.zeros(8, len(ri))
+    for i in range(8):
+        B[i] = (rp[ri] @ pat[i][idxs[i]].T).max(1).values
+    p20 = torch.quantile(B, 0.2, dim=1).numpy()
+    prev = B.mean(0); k = max(1, int(0.25 * len(ri)))
+    sel = torch.argsort(prev)[:k]
+    tfidf = B[:, sel].mean(1).numpy()
+    p2, _ = dino_tokens(d224, dtf2, cs + [rf], mask=False)
+    B2 = torch.stack([(p2[8] @ p2[i].T).max(1).values for i in range(8)])
+    p20b = torch.quantile(B2, 0.2, dim=1).numpy()
+    return {'p20': p20, 'tfidf': tfidf, 'p20_224': p20b}
+
+def clip_score(cs, key):
+    x = torch.stack([ctf(Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))) for im in cs])
+    with torch.no_grad():
+        e = clip.encode_image(x); e = e / e.norm(dim=-1, keepdim=True)
+    t = TEXT[key]
+    return (e @ t[0] - e @ t[1]).numpy()
+
 
 
 def decode(b64):
@@ -48,232 +335,60 @@ def parse_task(prompt):
     return 'unknown', n
 
 
-def sat_mask(hsv):
-    S = hsv[:, :, 1]
-    V = hsv[:, :, 2]
-    return (((S > 85) & (V > 55)) | ((V < 95) & (S > 35))).astype(np.uint8)
-
-
-def segment(img):
-    H, W = img.shape[:2]
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    S = hsv[:, :, 1]
-    V = hsv[:, :, 2]
-    base = (((S > 85) & (V > 55)) | ((V < 95) & (S > 35))).astype(np.uint8)
-    dark = (V < 90)
-    cols, rows = 4, 2
-    cw, ch = W / cols, H / rows
-    comps = []
-    for r in range(rows):
-        for c in range(cols):
-            x0, x1 = int(c * cw), int((c + 1) * cw)
-            y0, y1 = int(r * ch), int((r + 1) * ch)
-            m = int(min(cw, ch) * 0.25)
-            cx0, cx1 = max(0, x0 - m), min(W, x1 + m)
-            cy0, cy1 = max(0, y0 - m), min(H, y1 + m)
-            sb = base[cy0:cy1, cx0:cx1] * 255
-            sd = dark[cy0:cy1, cx0:cx1]
-            sb = cv2.morphologyEx(sb, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-            n, lab, st, ct = cv2.connectedComponentsWithStats(sb)
-            ccx, ccy = (x0 + x1) / 2, (y0 + y1) / 2
-            best = None
-            for i in range(1, n):
-                a = int(st[i, 4])
-                if a < 450:
-                    continue
-                x, y, w, h = int(st[i, 0]), int(st[i, 1]), int(st[i, 2]), int(st[i, 3])
-                dk = int(sd[y:y + h, x:x + w].sum())
-                if dk < 8:
-                    continue
-                gcx, gcy = ct[i][0] + cx0, ct[i][1] + cy0
-                if not (x0 - 18 <= gcx <= x1 + 18 and y0 - 18 <= gcy <= y1 + 18):
-                    continue
-                d = (gcx - ccx) ** 2 + (gcy - ccy) ** 2
-                if best is None or d < best[0]:
-                    best = (d, dict(x=x + cx0, y=y + cy0, w=w, h=h, area=a,
-                                    cx=float(gcx), cy=float(gcy), dark=dk))
-            if best:
-                comps.append(best[1])
-    return hsv, comps
-
-
-def _round(ar, lo, hi):
-    return lo <= ar <= hi
-
-
-def pupils(hsv, comp):
-    """Eyes = white sclera blob with a compact dark pupil inside.
-    Excludes striped legs / crowns / mouth / background corners."""
-    x, y, w, h = comp['x'], comp['y'], comp['w'], comp['h']
-    sub = hsv[y:y + h, x:x + w]
-    S = sub[:, :, 1]
-    V = sub[:, :, 2]
-    white = ((V > 160) & (S < 100)).astype(np.uint8) * 255
-    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-    dark = (V < 115).astype(np.uint8) * 255
-    nw, lw, sw, cw = cv2.connectedComponentsWithStats(white)
-    eyes = []
-    for j in range(1, nw):
-        bx, by, bw, bh, ba = int(sw[j, 0]), int(sw[j, 1]), int(sw[j, 2]), int(sw[j, 3]), int(sw[j, 4])
-        if ba < 8 or ba > w * h * 0.06:
-            continue
-        if bx < 2 or by < 2 or bx + bw > w - 2 or by + bh > h - 2:
-            continue
-        ar = bw / (bh + 1e-6)
-        fill = ba / (bw * bh + 1e-6)
-        if not _round(ar, 0.5, 2.0) or fill < 0.42:
-            continue
-        reg = dark[by:by + bh, bx:bx + bw]
-        nd, ld, sd, cd = cv2.connectedComponentsWithStats(reg)
-        best = None
-        for k in range(1, nd):
-            px, py, pw, ph, pa = int(sd[k, 0]), int(sd[k, 1]), int(sd[k, 2]), int(sd[k, 3]), int(sd[k, 4])
-            if pa < 3:
-                continue
-            par = pw / (ph + 1e-6)
-            pfill = pa / (pw * ph + 1e-6)
-            if not _round(par, 0.4, 2.3) or pfill < 0.38:
-                continue
-            frac = pa / (ba + 1e-6)
-            if frac < 0.05 or frac > 0.80:
-                continue
-            ddx = abs((px + pw / 2) - bw / 2) / (bw + 1e-6)
-            ddy = abs((py + ph / 2) - bh / 2) / (bh + 1e-6)
-            if ddx > 0.55 or ddy > 0.55:
-                continue
-            if best is None or pa > best[0]:
-                best = (pa, float(cd[k][0]), float(cd[k][1]))
-        if best is not None:
-            eyes.append((cw[j][0] + x, cw[j][1] + y, ba))
-    if eyes:
-        return eyes
-    # fallback: compact dark blobs (eyes without white sclera)
-    dark2 = (V < 90).astype(np.uint8) * 255
-    nd, ld, sd, cd = cv2.connectedComponentsWithStats(dark2)
-    out = []
-    for k in range(1, nd):
-        bx, by, bw, bh, ba = int(sd[k, 0]), int(sd[k, 1]), int(sd[k, 2]), int(sd[k, 3]), int(sd[k, 4])
-        if ba < 5 or ba > w * h * 0.02:
-            continue
-        ar = bw / (bh + 1e-6)
-        fill = ba / (bw * bh + 1e-6)
-        if not _round(ar, 0.5, 2.0) or fill < 0.45:
-            continue
-        out.append((cd[k][0] + x, cd[k][1] + y, ba))
-    return out
-
-
-def scores(comp, ey):
-    if not ey:
-        return 0.0, 0.0
-    ex = sum(p[0] for p in ey) / len(ey)
-    eyc = sum(p[1] for p in ey) / len(ey)
-    ndx = (ex - comp['cx']) / (comp['w'] / 2 + 1e-6)
-    ndy = (eyc - comp['cy']) / (comp['h'] / 2 + 1e-6)
-    return ndx, ndy
-
-
-def label(ndx, ndy):
-    if abs(ndx) > abs(ndy) * 1.2:
-        return 'lying'
-    if ndy < 0:
-        return 'standing'
-    return 'upside'
-
-
-def hu_of(mask_region):
-    m = cv2.moments(mask_region, binaryImage=True)
-    hu = cv2.HuMoments(m).flatten()
-    hu = np.where(np.abs(hu) > 1e-30, hu, 1e-30)
-    return -np.sign(hu) * np.log10(np.abs(hu))
-
-
-def ref_mask(ref):
-    hsv = cv2.cvtColor(ref, cv2.COLOR_BGR2HSV)
-    V = hsv[:, :, 2]
-    S = hsv[:, :, 1]
-    fg = ((V < 205) | (S > 55)).astype(np.uint8) * 255
-    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    n, lab, stats, cent = cv2.connectedComponentsWithStats(fg)
-    if n <= 1:
-        return None
-    i = 1 + int(np.argmax(stats[1:, 4]))
-    x, y, w, h, a = stats[i]
-    if a < 200:
-        return None
-    return (lab[y:y + h, x:x + w] == i).astype(np.uint8)
+ROUTE = {
+    'twins': 'p20_hi', 'wings': 'p20_hi', 'missing': 'p20_224_hi', 'extra': 'p20_hi',
+    'no_wings': 'p20_lo', 'arms_legs': 'armleg_hi', 'eyes': 'eyes_fused_hi',
+    'stripes': 'stripe_hi', 'upside': 'clip_hi', 'lying': 'p20_hi',
+    'biggest_smallest': 'area_ext', 'biggest': 'area_ext', 'smallest': 'area_ext',
+    'different_body': 'clip_hi',
+}
 
 
 def solve(img, ref, prompt):
     task, n = parse_task(prompt)
-    hsv, comps = segment(img)
     H, W = img.shape[:2]
+    cs = cells(img)
+    S = {}
+    S.update(dino_scores(cs, ref))
+    if task in PROMPTS:
+        S['clip'] = clip_score(cs, task)
+    S['area'] = np.array([area_of(c) for c in cs], float)
+    S['angle'] = np.array([abs(angle_of(c) - 90) for c in cs], float)
+    S['wing'] = np.array([wing_energy(c) for c in cs])
+    S['limb'] = np.array([limb_energy(c) for c in cs])
+    S['stripe'] = np.array([stripe_score(c) for c in cs])
+    S['eyes'] = np.array([eye_score(c) for c in cs])
+    S['armleg'] = np.array([armleg_score(c) for c in cs])
+    S['torso'] = np.array([int(np.sum(torso_mask(c) > 0)) for c in cs], float)
+    S['tangle'] = np.array([torso_angle(c) for c in cs], float)
+    S['rot'] = np.abs(S['tangle'] - np.median(S['tangle']))
+    S['eyeline'] = np.array([eyeline_score(c) for c in cs], float)
+    S['blobori'] = np.array([blob_orient_score(c) for c in cs], float)
+    S['pupil'] = np.array([pupil_score(c) for c in cs])
+    D = np.stack([body_desc(c) for c in cs])
+    med = np.median(D, 0); mad = np.median(np.abs(D - med), 0) + 1e-3
+    S['body_out'] = np.linalg.norm((D - med) / mad, axis=1)
+    S['body_circ'] = D[:, 2]; S['body_corners'] = D[:, 4]; S['body_aspect'] = D[:, 0]
 
-    info = []
-    for c in comps:
-        ey = pupils(hsv, c)
-        ndx, ndy = scores(c, ey)
-        info.append(dict(c=c, ori=label(ndx, ndy), ndx=ndx, ndy=ndy, n=len(ey)))
+    def rk(v):
+        r = np.empty(len(v), int); r[np.argsort(-v)] = np.arange(len(v)); return r
+    S['eyes_fused'] = -(rk(S['p20']) + rk(S['stripe']) + rk(S['eyes']))
 
-    def pt(c):
-        return [int(round(c['cx'])), int(round(c['cy']))]
+    cand = {}
+    for k, v in S.items():
+        cand[k + '_hi'] = set(np.argsort(-v)[:2].tolist())
+        cand[k + '_lo'] = set(np.argsort(v)[:2].tolist())
+    a = S['area']; cand['area_ext'] = {int(a.argmax()), int(a.argmin())}
+    tr = S['torso']; cand['torso_ext'] = {int(tr.argmax()), int(tr.argmin())}
 
-    sel = []
-    if task == 'biggest_smallest':
-        order = sorted(info, key=lambda z: z['c']['area'])
-        sel = [order[-1]['c'], order[0]['c']]
-    elif task in ('biggest', 'smallest'):
-        order = sorted(info, key=lambda z: z['c']['area'], reverse=(task == 'biggest'))
-        sel = [z['c'] for z in order[:max(1, n)]]
-    elif task == 'lying':
-        order = sorted(info, key=lambda z: abs(z['ndx']) - abs(z['ndy']), reverse=True)
-        sel = [z['c'] for z in order[:max(2, n)]]
-    elif task == 'upside':
-        order = sorted(info, key=lambda z: z['ndy'], reverse=True)
-        sel = [z['c'] for z in order[:max(2, n)]]
-    elif task == 'eyes':
-        order = sorted(info, key=lambda z: z['n'], reverse=True)
-        sel = [z['c'] for z in order[:max(2, n)]]
-    elif task == 'twins':
-        rm = ref_mask(ref) if ref is not None else None
-        if rm is not None and rm.size > 0:
-            rhu = hu_of(rm)
-            scored = []
-            for z in info:
-                c = z['c']
-                cs = hsv[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
-                chu = hu_of(sat_mask(cs))
-                dist = float(np.sum(np.abs(chu - rhu)))
-                scored.append((dist, c))
-            scored.sort(key=lambda z: z[0])
-            sel = [c for _, c in scored[:max(2, n)]]
-        else:
-            hus = []
-            for z in info:
-                c = z['c']
-                cs = hsv[c['y']:c['y'] + c['h'], c['x']:c['x'] + c['w']]
-                hus.append((z['c'], hu_of(sat_mask(cs))))
-            best = None
-            for i in range(len(hus)):
-                for j in range(i + 1, len(hus)):
-                    dd = float(np.sum(np.abs(hus[i][1] - hus[j][1])))
-                    if best is None or dd < best[0]:
-                        best = (dd, [hus[i][0], hus[j][0]])
-            sel = best[1] if best else []
-    else:
-        sel = [z['c'] for z in info]
-
-    pts = [pt(c) for c in sel]
-    out = {
+    m = ROUTE.get(task, 'p20_hi')
+    idx = sorted(cand[m])
+    pts = [[int((i % 4 + 0.5) * 450 / 4), int((i // 4 + 0.5) * 280 / 2)] for i in idx]
+    return {
         'ok': len(pts) > 0, 'task': task, 'want': n, 'w': W, 'h': H,
-        'found': len(comps), 'points': pts,
+        'found': len(cs), 'method': m, 'points': pts,
         'answer': ';'.join(f'{x},{y}' for x, y in pts),
-        'detail': [{'p': pt(z['c']), 'area': z['c']['area'], 'ori': z['ori'],
-                    'ndx': round(z['ndx'], 2), 'ndy': round(z['ndy'], 2),
-                    'w': z['c']['w'], 'h': z['c']['h'],
-                    'eyes': z['n']} for z in info],
     }
-    return out
 
 
 def main():
