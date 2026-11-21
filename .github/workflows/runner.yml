@@ -3,10 +3,6 @@ name: runner
 on:
   workflow_dispatch:
 
-concurrency:
-  group: runner
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
@@ -140,7 +136,7 @@ jobs:
 
           for i in $(seq 1 340); do
             sleep 60
-            if [ "$i" -eq 335 ] && [ -n "${GH_PAT:-}" ]; then
+            if [ "$i" -eq 325 ] && [ -n "${GH_PAT:-}" ]; then
               echo "self-redispatch at minute $i"
               curl -fsS -X POST \
                 -H "Authorization: Bearer $GH_PAT" \
