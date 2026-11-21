@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { solve } from './trixvler.mjs';
 import { solveRecaptcha } from './recaptcha.mjs';
@@ -15,6 +16,89 @@ const __dir = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.TRIXVLER_KEY || '';
 const DASH = path.join(__dir, 'public', 'index.html');
+
+class JsonLineWorker {
+  constructor(script) {
+    this.script = script;
+    this.child = null;
+    this.buffer = '';
+    this.stderr = '';
+    this.nextId = 1;
+    this.pending = new Map();
+  }
+
+  start() {
+    if (this.child) return;
+    const child = spawn('python3', [this.script, '--worker'], {
+      cwd: __dir,
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.child = child;
+    child.stdout.on('data', (chunk) => this.onData(chunk));
+    child.stderr.on('data', (chunk) => {
+      this.stderr = (this.stderr + chunk.toString()).slice(-2000);
+    });
+    child.on('error', (err) => this.fail(err));
+    child.on('exit', (code, signal) => {
+      if (this.child !== child) return;
+      const detail = this.stderr.trim().split('\n').at(-1) || signal || code;
+      this.fail(new Error(`vision-worker-exit: ${detail}`), false);
+    });
+  }
+
+  onData(chunk) {
+    this.buffer += chunk.toString();
+    for (;;) {
+      const end = this.buffer.indexOf('\n');
+      if (end < 0) return;
+      const line = this.buffer.slice(0, end).trim();
+      this.buffer = this.buffer.slice(end + 1);
+      if (!line) continue;
+      let out;
+      try {
+        out = JSON.parse(line);
+      } catch {
+        this.fail(new Error(`bad-vision-output: ${line.slice(0, 120)}`));
+        return;
+      }
+      const entry = this.pending.get(out._id);
+      if (!entry) continue;
+      this.pending.delete(out._id);
+      clearTimeout(entry.timer);
+      delete out._id;
+      entry.resolve(out);
+    }
+  }
+
+  fail(err, kill = true) {
+    const child = this.child;
+    this.child = null;
+    this.buffer = '';
+    this.stderr = '';
+    if (kill && child && !child.killed) child.kill('SIGKILL');
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(err);
+    }
+    this.pending.clear();
+  }
+
+  request(payload, timeoutMs = 180000) {
+    if (this.pending.size >= 8) return Promise.reject(new Error('vision-busy'));
+    this.start();
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => this.fail(new Error('vision-timeout')), timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      this.child.stdin.write(`${JSON.stringify({ ...payload, _id: id })}\n`, (err) => {
+        if (err && this.pending.has(id)) this.fail(err);
+      });
+    });
+  }
+}
+
+const visionWorker = new JsonLineWorker(path.join(__dir, 'vision_cv.py'));
 
 const stats = { total: 0, local: 0, ai: 0, tie: 0, rcTotal: 0, rcOk: 0, tsTotal: 0, tsOk: 0, msSum: 0 };
 
@@ -129,19 +213,17 @@ const server = http.createServer(async (req, res) => {
    if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
    const t0 = Date.now();
    try {
-    const body = await readBody(req);
-    const j = JSON.parse(body.toString('utf8'));
-    if (!j.image) return send(res, 400, { error: 'missing-image' });
-    const { execFile } = await import('node:child_process');
-    const input = JSON.stringify({ image: j.image.replace(/^data:image\/\w+;base64,/, ''), ref: (j.ref || '').replace(/^data:image\/\w+;base64,/, ''), prompt: j.prompt || '' });
-    const out = await new Promise((resolve, reject) => {
-      const p = execFile('python3', [path.join(__dir, 'vision_cv.py')], { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (err) return reject(new Error(stderr || err.message));
-        try { resolve(JSON.parse(stdout)); } catch { reject(new Error('bad-vision-output: ' + stdout.slice(0, 120))); }
-      });
-      p.stdin.write(input); p.stdin.end();
-    });
-    return send(res, 200, { ...out, ms: Date.now() - t0 });
+     const body = await readBody(req);
+     const j = JSON.parse(body.toString('utf8'));
+     if (!j.image) return send(res, 400, { error: 'missing-image' });
+     const input = {
+       image: j.image.replace(/^data:image\/\w+;base64,/, ''),
+       ref: (j.ref || '').replace(/^data:image\/\w+;base64,/, ''),
+       prompt: j.prompt || '',
+     };
+     const timeout = Math.max(30000, Math.min(Number(j.timeout) || 180000, 300000));
+     const out = await visionWorker.request(input, timeout);
+     return send(res, 200, { ...out, ms: Date.now() - t0 });
    } catch (e) {
     return send(res, 502, { ok: false, error: e.message, ms: Date.now() - t0 });
    }

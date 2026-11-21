@@ -1,9 +1,6 @@
-import sys, json, base64, re, os
+import sys, json, base64, re
 import cv2
 import numpy as np
-import torch, timm, open_clip
-from PIL import Image
-import torchvision.transforms as T
 
 W, H = 450, 280
 G = 518 // 14
@@ -36,6 +33,39 @@ def torso_mask(crop):
 def area_of(crop):
     m, st = largest_comp(fgmask(crop))
     return int(st[4]) if st is not None else 0
+
+def ink_size(crop):
+    """Sprite scale without counting the pale confetti and guide lines."""
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    return int(((hsv[:, :, 1] > 100) & (hsv[:, :, 2] < 160)).sum())
+
+def hue_bbox_size(crop):
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    height, width = hue.shape
+    best_score = -1.0
+    best_area = 0
+    for bucket in range(24):
+        low = bucket * 180 / 24
+        high = (bucket + 1) * 180 / 24
+        mask = (
+            (hue >= low) & (hue < high)
+            & (saturation > 70) & (value > 45)
+        ).astype(np.uint8)
+        count, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
+        for i in range(1, count):
+            x, y, w, h, area = stats[i]
+            if x <= 2 or y <= 2 or x + w >= width - 2 or y + h >= height - 2:
+                continue
+            if area <= 30:
+                continue
+            dx = (centroids[i, 0] - width / 2) / width
+            dy = (centroids[i, 1] - height / 2) / height
+            score = area / (1 + 100 * (dx * dx + dy * dy))
+            if score > best_score:
+                best_score = score
+                best_area = int(w * h)
+    return best_area
 
 def angle_of(crop):
     m, st = largest_comp(fgmask(crop))
@@ -108,26 +138,40 @@ def stripe_score(crop):
 
 def eye_count(crop):
     t = torso_mask(crop)
-    if t is None: return 0.0
+    if t is None: return 0
     ys, xs = np.where(t > 0)
-    if len(xs) < 20: return 0.0
+    if len(xs) < 20: return 0
     x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    body_w = x1 - x0
+    body_h = y1 - y0
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     white = ((hsv[:, :, 2] > 140) & (hsv[:, :, 1] < 95)).astype(np.uint8)
-    n, lab, st, ct = cv2.connectedComponentsWithStats(white)
-    cnt = 0
+    n, _, st, ct = cv2.connectedComponentsWithStats(white)
+    candidates = []
     for i in range(1, n):
         a = st[i, 4]
-        if a < 12 or a > 500: continue
+        if a < 15 or a > 500: continue
         cx, cy = ct[i]
-        if not (x0 - 4 <= cx <= x1 + 4 and y0 - 4 <= cy <= y1 + 4): continue
-        if cy > (y0 + y1) / 2 + 3: continue
         w = st[i, 2]; h = st[i, 3]
-        if 0.35 < w / (h + 1e-6) < 2.8: cnt += 1
-    return cnt
+        ratio = w / (h + 1e-6)
+        if not (0.55 < ratio < 1.7): continue
+        if not (x0 - 0.3 * body_w <= cx <= x1 + 0.3 * body_w): continue
+        if not (y0 - max(25, 0.9 * body_h) <= cy <= y0 + 0.4 * body_h): continue
+        candidates.append((float(cy), int(a)))
+    candidates.sort()
+    rows = []
+    for candidate in candidates:
+        if not rows or candidate[0] - rows[-1][-1][0] > 8.2:
+            rows.append([candidate])
+        else:
+            rows[-1].append(candidate)
+    if not rows:
+        return 0
+    best = max(rows, key=lambda row: (sum(area for _, area in row), -row[0][0]))
+    return len(best)
 
-def eye_score(crop):
-    return -abs(eye_count(crop) - 2)
+def eye_score(crop, target=2):
+    return -abs(eye_count(crop) - target)
 
 def eye_centers(crop):
     t = torso_mask(crop)
@@ -229,64 +273,83 @@ def pupil_count(crop):
 def pupil_score(crop):
     return -abs(pupil_count(crop) - 2)
 
-# ---- models ----
-dino = timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True, num_classes=0, img_size=518); dino.eval()
-dtf = T.Compose([T.Resize((518, 518)), T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
-d224 = timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True, num_classes=0, img_size=224); d224.eval()
-dtf2 = T.Compose([T.Resize((224, 224)), T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
-clip, _, ctf = open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')
-ctok = open_clip.get_tokenizer('ViT-B-32'); clip.eval()
-PROMPTS = {
-    'upside': ("an upside-down cartoon monster with its feet up", "an upright cartoon monster"),
-    'different_body': ("a cartoon monster with a round body", "a cartoon monster with a square body"),
-    'diff_body': ("a cartoon monster with a round body", "a cartoon monster with a square body"),
-    'no_wings': ("a cartoon monster with no wings", "a cartoon monster with large wings"),
-    'wings': ("a cartoon monster with large wings", "a cartoon monster with no wings"),
-    'eyes': ("a cartoon monster with two eyes", "a cartoon monster with one eye"),
-    'stripes': ("a cartoon monster with stripes on its body", "a cartoon monster with a plain body"),
-    'arms_legs': ("a cartoon monster with arms and legs", "a cartoon monster with wings only"),
-}
-TEXT = {}
-for k, (p, n) in PROMPTS.items():
-    with torch.no_grad():
-        t = clip.encode_text(ctok([p, n])); TEXT[k] = t / t.norm(dim=-1, keepdim=True)
+# ---- local model (loaded only for reference-dependent tasks) ----
+_DINO = {}
+_CLIP = None
 
-def dino_tokens(model, tf, imgs, mask=True):
-    x = torch.stack([tf(Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))) for im in imgs])
+def dino_model(size):
+    if size in _DINO:
+        return _DINO[size]
+    import torch
+    import timm
+    from PIL import Image
+    import torchvision.transforms as transforms
+    model = timm.create_model(
+        'vit_small_patch14_dinov2.lvd142m', pretrained=True,
+        num_classes=0, img_size=size)
+    model.eval()
+    tf = transforms.Compose([
+        transforms.Resize((size, size)), transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406),
+                             (0.229, 0.224, 0.225)),
+    ])
+    _DINO[size] = (torch, Image, model, tf)
+    return _DINO[size]
+
+def dino_similarity(cs, ref, size=224):
+    if ref is None:
+        raise ValueError('missing-ref')
+    torch, Image, model, tf = dino_model(size)
+    imgs = cs + [ref]
+    x = torch.stack([
+        tf(Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB)))
+        for im in imgs
+    ])
     with torch.no_grad():
         f = model.forward_features(x)
     pat = f[:, model.num_prefix_tokens:]
     pat = pat / pat.norm(dim=-1, keepdim=True)
+    grid = int(round(size / 14))
     idxs = []
-    gg = int(round(x.shape[-1] / 14))
     for im in imgs:
-        mm = cv2.resize(fgmask(im), (gg, gg), interpolation=cv2.INTER_AREA)
+        mm = cv2.resize(fgmask(im), (grid, grid), interpolation=cv2.INTER_AREA)
         idx = np.where(mm.reshape(-1) > 0.3)[0]
-        if not mask or len(idx) < 20: idx = np.arange(gg * gg)
+        if size <= 224 or len(idx) < 20:
+            idx = np.arange(grid * grid)
         idxs.append(torch.from_numpy(idx).long())
-    return pat, idxs
-
-def dino_scores(cs, rf):
-    pat, idxs = dino_tokens(dino, dtf, cs + [rf])
-    rp = pat[8]; ri = idxs[8]
-    B = torch.zeros(8, len(ri))
+    ref_patches = pat[8][idxs[8]]
+    scores = []
     for i in range(8):
-        B[i] = (rp[ri] @ pat[i][idxs[i]].T).max(1).values
-    p20 = torch.quantile(B, 0.2, dim=1).numpy()
-    prev = B.mean(0); k = max(1, int(0.25 * len(ri)))
-    sel = torch.argsort(prev)[:k]
-    tfidf = B[:, sel].mean(1).numpy()
-    p2, _ = dino_tokens(d224, dtf2, cs + [rf], mask=False)
-    B2 = torch.stack([(p2[8] @ p2[i].T).max(1).values for i in range(8)])
-    p20b = torch.quantile(B2, 0.2, dim=1).numpy()
-    return {'p20': p20, 'tfidf': tfidf, 'p20_224': p20b}
+        matches = ref_patches @ pat[i][idxs[i]].T
+        scores.append(float(torch.quantile(matches.max(1).values, 0.2)))
+    return np.asarray(scores, dtype=float)
 
-def clip_score(cs, key):
-    x = torch.stack([ctf(Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))) for im in cs])
+def clip_similarity(cs, positive, negative):
+    global _CLIP
+    if _CLIP is None:
+        import torch
+        import open_clip
+        from PIL import Image
+        model, _, transform = open_clip.create_model_and_transforms(
+            'ViT-B-32', pretrained='openai')
+        model.eval()
+        tokenizer = open_clip.get_tokenizer('ViT-B-32')
+        _CLIP = (torch, Image, model, transform, tokenizer, {})
+    torch, Image, model, transform, tokenizer, text_cache = _CLIP
+    key = (positive, negative)
+    if key not in text_cache:
+        with torch.no_grad():
+            text = model.encode_text(tokenizer([positive, negative]))
+            text_cache[key] = text / text.norm(dim=-1, keepdim=True)
+    images = torch.stack([
+        transform(Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB)))
+        for im in cs
+    ])
     with torch.no_grad():
-        e = clip.encode_image(x); e = e / e.norm(dim=-1, keepdim=True)
-    t = TEXT[key]
-    return (e @ t[0] - e @ t[1]).numpy()
+        encoded = model.encode_image(images)
+        encoded = encoded / encoded.norm(dim=-1, keepdim=True)
+    text = text_cache[key]
+    return (encoded @ text[0] - encoded @ text[1]).numpy()
 
 
 
@@ -298,111 +361,232 @@ def decode(b64):
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
 
 
+def parse_task_spec(prompt):
+    t = re.sub(r'\s+', ' ', (prompt or '').lower()).strip()
+    m = re.search(r'\btap(?:\s+(?:its|the))?\s+(\d+)\b', t)
+    if not m:
+        m = re.search(r'\b(\d+)\b', t)
+    count = int(m.group(1)) if m else 2
+    eye = re.search(r'\bwith\s+(\d+)\s+eyes?\b', t)
+    target_eye_count = int(eye.group(1)) if eye else None
+    parts = tuple(p for p in ('arms', 'legs', 'wings') if p in t)
+
+    if 'twin' in t or 'identical' in t or 'same parts' in t:
+        task = 'twins'
+    elif 'missing' in t:
+        task = 'missing'
+    elif 'extra part' in t or 'part added' in t:
+        task = 'extra'
+    elif 'no wing' in t or 'without wing' in t:
+        task = 'no_wings'
+    elif 'same wing' in t:
+        task = 'same_wings'
+    elif len(parts) >= 2:
+        task = 'parts'
+    elif 'eye' in t:
+        task = 'eyes'
+    elif 'stripe' in t:
+        task = 'stripes'
+    elif 'upside' in t or 'on their head' in t or 'on its head' in t:
+        task = 'upside'
+    elif 'lying' in t or 'on their side' in t or 'on its side' in t:
+        task = 'lying'
+    elif ('biggest' in t or 'largest' in t) and ('smallest' in t or 'tiniest' in t):
+        task, count = 'biggest_smallest', 2
+    elif 'biggest' in t or 'largest' in t:
+        task = 'biggest'
+    elif 'smallest' in t or 'tiniest' in t:
+        task = 'smallest'
+    elif 'different body' in t:
+        task = 'different_body'
+    else:
+        task = 'unknown'
+    return {
+        'task': task, 'count': max(1, min(count, 8)),
+        'eye_count': target_eye_count, 'parts': parts,
+    }
+
+
 def parse_task(prompt):
-    t = (prompt or '').lower()
-    m = re.search(r'\b(\d+)\b', prompt or '')
-    n = int(m.group(1)) if m else 2
-    if 'lying' in t or 'on their side' in t or 'on its side' in t:
-        return 'lying', n
-    if 'upside' in t or 'on their head' in t or 'on its head' in t:
-        return 'upside', n
-    big = ('biggest' in t or 'largest' in t)
-    small = ('smallest' in t or 'tiniest' in t)
-    if big and small:
-        return 'biggest_smallest', 2
-    if big:
-        return 'biggest', n
-    if small:
-        return 'smallest', n
-    if 'no wing' in t or 'no wings' in t:
-        return 'no_wings', n
-    if 'wing' in t:
-        return 'wings', n
-    if 'missing' in t:
-        return 'missing', n
-    if 'extra' in t:
-        return 'extra', n
-    if 'arms' in t and 'legs' in t:
-        return 'arms_legs', n
-    if 'eye' in t:
-        return 'eyes', n
-    if 'stripe' in t:
-        return 'stripes', n
-    if 'different body' in t or 'different' in t:
-        return 'different_body', n
-    if 'twin' in t or 'identical' in t or 'same parts' in t or 'same' in t or 'match' in t:
-        return 'twins', n
-    return 'unknown', n
+    spec = parse_task_spec(prompt)
+    return spec['task'], spec['count']
 
 
-ROUTE = {
-    'twins': 'p20_hi', 'wings': 'p20_hi', 'missing': 'p20_224_hi', 'extra': 'p20_hi',
-    'no_wings': 'p20_lo', 'arms_legs': 'armleg_hi', 'eyes': 'eyes_fused_hi',
-    'stripes': 'stripe_hi', 'upside': 'clip_hi', 'lying': 'p20_hi',
-    'biggest_smallest': 'area_ext', 'biggest': 'area_ext', 'smallest': 'area_ext',
-    'different_body': 'stripe_lo',
+def ranked(scores, count, high=True):
+    scores = np.asarray(scores, dtype=float)
+    if len(scores) < count or not np.all(np.isfinite(scores)):
+        return [], 0.0
+    order = np.argsort(-scores if high else scores, kind='stable')
+    picked = order[:count].tolist()
+    if count >= len(scores):
+        return sorted(picked), 0.0
+    boundary = scores[order[count - 1]] - scores[order[count]]
+    if not high:
+        boundary = -boundary
+    confidence = max(0.0, float(boundary) / (float(np.ptp(scores)) + 1e-6))
+    return sorted(picked), min(confidence, 1.0)
+
+
+def extremes(scores):
+    scores = np.asarray(scores, dtype=float)
+    lo = int(np.argmin(scores)); hi = int(np.argmax(scores))
+    if lo == hi:
+        return [], 0.0
+    ordered = np.sort(scores)
+    span = float(np.ptp(scores)) + 1e-6
+    confidence = min(float(ordered[1] - ordered[0]),
+                     float(ordered[-1] - ordered[-2])) / span
+    return sorted([lo, hi]), max(0.0, min(confidence, 1.0))
+
+
+def different_body_pair(cs):
+    desc = np.stack([body_desc(c) for c in cs]).astype(float)
+    # Size is intentionally omitted: this task is only about torso shape.
+    features = desc[:, :5]
+    med = np.median(features, axis=0)
+    mad = np.median(np.abs(features - med), axis=0)
+    z = (features - med) / np.maximum(mad, 0.05)
+    candidates = []
+    for i in range(len(z)):
+        for j in range(i + 1, len(z)):
+            rest = np.delete(z, (i, j), axis=0)
+            pair_center = (z[i] + z[j]) / 2
+            rest_center = rest.mean(axis=0)
+            separation = np.linalg.norm(pair_center - rest_center)
+            within = np.linalg.norm(z[i] - z[j])
+            rest_spread = np.mean(np.linalg.norm(rest - rest_center, axis=1))
+            candidates.append((separation - 1.25 * within - 0.15 * rest_spread, i, j))
+    candidates.sort(reverse=True)
+    best = candidates[0]
+    span = abs(best[0]) + 1e-6
+    confidence = max(0.0, min((best[0] - candidates[1][0]) / span, 1.0))
+    return sorted([best[1], best[2]]), confidence
+
+
+REFERENCE_TASKS = {
+    'twins': (518, True),
+    'same_wings': (518, True),
+    'missing': (224, True),
+    'extra': (518, True),
+    'no_wings': (518, False),
+    'lying': (518, True),
 }
 
 
 def solve(img, ref, prompt):
-    task, n = parse_task(prompt)
-    H, W = img.shape[:2]
+    spec = parse_task_spec(prompt)
+    task, count = spec['task'], spec['count']
+    if img is None:
+        return {'ok': False, 'task': task, 'error': 'no-image'}
+    height, width = img.shape[:2]
+    if (width, height) != (W, H):
+        return {
+            'ok': False, 'task': task, 'error': 'bad-image-size',
+            'expected': [W, H], 'actual': [width, height],
+        }
+    if task == 'unknown':
+        return {'ok': False, 'task': task, 'error': 'unknown-task'}
+
     cs = cells(img)
-    S = {}
-    S.update(dino_scores(cs, ref))
-    if task in PROMPTS:
-        S['clip'] = clip_score(cs, task)
-    S['area'] = np.array([area_of(c) for c in cs], float)
-    S['angle'] = np.array([abs(angle_of(c) - 90) for c in cs], float)
-    S['wing'] = np.array([wing_energy(c) for c in cs])
-    S['limb'] = np.array([limb_energy(c) for c in cs])
-    S['stripe'] = np.array([stripe_score(c) for c in cs])
-    S['eyes'] = np.array([eye_score(c) for c in cs])
-    S['armleg'] = np.array([armleg_score(c) for c in cs])
-    S['torso'] = np.array([int(np.sum(torso_mask(c) > 0)) for c in cs], float)
-    S['tangle'] = np.array([torso_angle(c) for c in cs], float)
-    S['rot'] = np.abs(S['tangle'] - np.median(S['tangle']))
-    S['eyeline'] = np.array([eyeline_score(c) for c in cs], float)
-    S['blobori'] = np.array([blob_orient_score(c) for c in cs], float)
-    S['pupil'] = np.array([pupil_score(c) for c in cs])
-    D = np.stack([body_desc(c) for c in cs])
-    med = np.median(D, 0); mad = np.median(np.abs(D - med), 0) + 1e-3
-    S['body_out'] = np.linalg.norm((D - med) / mad, axis=1)
-    S['body_circ'] = D[:, 2]; S['body_corners'] = D[:, 4]; S['body_aspect'] = D[:, 0]
+    method = ''
+    confidence = 0.0
+    if task == 'parts':
+        required = set(spec['parts'])
+        if required == {'arms', 'legs'}:
+            scores = np.asarray([armleg_score(c) for c in cs], dtype=float)
+            idx, confidence = ranked(scores, count, high=True)
+            method = 'armleg_cv'
+        else:
+            if ref is None:
+                return {'ok': False, 'task': task, 'error': 'missing-ref'}
+            scores = dino_similarity(cs, ref, size=518)
+            idx, confidence = ranked(scores, count, high=True)
+            method = 'dino518_fallback'
+    elif task == 'eyes':
+        target = spec['eye_count'] or 2
+        scores = np.asarray([eye_score(c, target) for c in cs], dtype=float)
+        idx, confidence = ranked(scores, count, high=True)
+        method = 'eye_count_cv'
+    elif task == 'upside':
+        scores = clip_similarity(
+            cs,
+            'an upside-down cartoon monster with its feet up',
+            'an upright cartoon monster',
+        )
+        idx, confidence = ranked(scores, count, high=True)
+        method = 'clip_fallback'
+    elif task in REFERENCE_TASKS:
+        if ref is None:
+            return {'ok': False, 'task': task, 'error': 'missing-ref'}
+        size, high = REFERENCE_TASKS[task]
+        scores = dino_similarity(cs, ref, size=size)
+        idx, confidence = ranked(scores, count, high=high)
+        method = f'dino{size}_{"hi" if high else "lo"}'
+    elif task in ('biggest_smallest', 'biggest', 'smallest'):
+        scores = np.asarray([hue_bbox_size(c) for c in cs], dtype=float)
+        if task == 'biggest_smallest':
+            idx, confidence = extremes(scores)
+            method = 'hue_bbox_extremes'
+        else:
+            idx, confidence = ranked(scores, count, high=(task == 'biggest'))
+            method = 'hue_bbox_size'
+    elif task == 'stripes':
+        scores = np.asarray([stripe_score(c) for c in cs], dtype=float)
+        idx, confidence = ranked(scores, count, high=True)
+        method = 'stripe_cv'
+    elif task == 'different_body':
+        idx, confidence = different_body_pair(cs)
+        method = 'body_cluster_cv'
+        if confidence < 0.5:
+            scores = clip_similarity(
+                cs,
+                'a cartoon monster with a round body',
+                'a cartoon monster with a square body',
+            )
+            idx, confidence = ranked(scores, count, high=True)
+            method = 'clip_fallback'
+    else:
+        return {'ok': False, 'task': task, 'error': 'unsupported-task'}
 
-    def rk(v):
-        r = np.empty(len(v), int); r[np.argsort(-v)] = np.arange(len(v)); return r
-    S['eyes_fused'] = -(rk(S['p20']) + rk(S['stripe']) + rk(S['eyes']))
-
-    cand = {}
-    for k, v in S.items():
-        cand[k + '_hi'] = set(np.argsort(-v)[:2].tolist())
-        cand[k + '_lo'] = set(np.argsort(v)[:2].tolist())
-    a = S['area']; cand['area_ext'] = {int(a.argmax()), int(a.argmin())}
-    tr = S['torso']; cand['torso_ext'] = {int(tr.argmax()), int(tr.argmin())}
-
-    m = ROUTE.get(task, 'p20_hi')
-    idx = sorted(cand[m])
-    pts = [[int((i % 4 + 0.5) * 450 / 4), int((i // 4 + 0.5) * 280 / 2)] for i in idx]
+    points = [[CENTERS[i][0], CENTERS[i][1]] for i in idx]
+    ok = len(points) == count
     return {
-        'ok': len(pts) > 0, 'task': task, 'want': n, 'w': W, 'h': H,
-        'found': len(cs), 'method': m, 'points': pts,
-        'answer': ';'.join(f'{x},{y}' for x, y in pts),
+        'ok': ok, 'task': task, 'want': count, 'w': width, 'h': height,
+        'found': sum(area_of(c) > 50 for c in cs), 'method': method,
+        'indices': idx, 'points': points,
+        'answer': ';'.join(f'{x},{y}' for x, y in points),
+        'confidence': round(float(confidence), 4),
+        'ambiguous': confidence < 0.04,
     }
 
 
+def handle(data):
+    try:
+        return solve(
+            decode(data.get('image', '')),
+            decode(data.get('ref', '')),
+            data.get('prompt', ''),
+        )
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:200]}
+
+
 def main():
-    d = json.loads(sys.stdin.read())
-    img = decode(d.get('image', ''))
-    if img is None:
-        print(json.dumps({'ok': False, 'error': 'no-image'}))
+    if '--worker' in sys.argv:
+        for line in sys.stdin:
+            try:
+                data = json.loads(line)
+                request_id = data.pop('_id', None)
+                out = handle(data)
+                if request_id is not None:
+                    out['_id'] = request_id
+            except Exception as exc:
+                out = {'ok': False, 'error': str(exc)[:200]}
+            print(json.dumps(out), flush=True)
         return
-    ref = decode(d.get('ref', ''))
-    print(json.dumps(solve(img, ref, d.get('prompt', ''))))
+    raw = sys.stdin.read()
+    print(json.dumps(handle(json.loads(raw))))
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        print(json.dumps({'ok': False, 'error': str(e)}))
+    main()
